@@ -43,6 +43,8 @@ public class RosbridgeImageSubscriber : MonoBehaviour
     [SerializeField]
     private GameObject EnableController;
     [SerializeField]
+    private GameObject DisableController;
+    [SerializeField]
     private GameObject DisconnectButton;
     [SerializeField]
     private GameObject PanelSettings;
@@ -233,6 +235,10 @@ public class RosbridgeImageSubscriber : MonoBehaviour
         if (PanelSettings != null)
         {
             PanelSettings.SetActive(state);
+        }
+        if (DisableController != null)
+        {
+            DisableController.SetActive(state);
         }
     }
 }
