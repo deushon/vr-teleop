@@ -3,7 +3,7 @@ using System.Collections.Concurrent;
 using System.Text;
 using System.Threading;
 using UnityEngine;
-using UnityEngine.UI; // если используешь RawImage для UI
+using UnityEngine.UI;
 using WebSocketSharp;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -12,17 +12,17 @@ using TMPro;
 public class RosbridgeImageSubscriber : MonoBehaviour
 {
     [Header("ROSBridge")]
-    public string wsUrl = "ws://192.168.1.100:9090"; // замени на IP робота
-    public string imageTopic = "/camera/image/compressed"; // часто так называется
+    public string wsUrl = "ws://192.168.1.100:9090"; 
+    public string imageTopic = "/camera/image/compressed";
 
     [Header("Target")]
-    public RawImage targetUI;          // либо
-    public Renderer targetRenderer;    // что-то одно из них
+    public RawImage targetUI;
+    public Renderer targetRenderer;
 
     [Header("Perf")]
-    [Tooltip("Ставит throttle_rate (мс) в subscribe. 0 = без дросселя.")]
+    [Tooltip("Placed throttle_rate (ms) in subscribe. 0 = without drossel.")]
     public int subscribeThrottleMs = 0;
-    [Tooltip("Пропуск кадров, если не успеваем декодировать (0 = не пропускать).")]
+    [Tooltip("Number of skippable frames, if we don't have time to decode (0 = don't skip).")]
     public int maxQueueFrames = 1;
 
     private WebSocket ws;
@@ -31,10 +31,10 @@ public class RosbridgeImageSubscriber : MonoBehaviour
     private readonly object textureLock = new();
     private Thread decodeThread;
     private volatile bool running;
-    private byte[] latestDecoded; // JPEG/PNG -> байты исходного файла (не raw)
-    private byte[] workingBuffer; // переисп. буфер под base64
+    private byte[] latestDecoded;
+    private byte[] workingBuffer;
 
-    // Опционально: статистика
+    // Optional: stats
     private int receivedFrames;
     private int droppedFrames;
     private float lastStatTime;
@@ -91,19 +91,17 @@ public class RosbridgeImageSubscriber : MonoBehaviour
     void Connect()
     {
         ws = new WebSocket(wsUrl);
-        // Если rosbridge поддерживает permessage-deflate — включай (снижает трафик)
         ws.Compression = WebSocketSharp.CompressionMethod.Deflate;
 
         ws.OnOpen += (s, e) =>
         {
             Debug.Log("[ROS] WebSocket opened");
-            // Подписка на CompressedImage
             var sub = new
             {
                 op = "subscribe",
                 topic = imageTopic,
                 type = "sensor_msgs/CompressedImage",
-                throttle_rate = subscribeThrottleMs // миллисекунды, можно 33 для около 30 FPS
+                throttle_rate = subscribeThrottleMs
             };
             ws.Send(JsonConvert.SerializeObject(sub));
         };
@@ -112,24 +110,19 @@ public class RosbridgeImageSubscriber : MonoBehaviour
         {
             try
             {
-                // rosbridge шлёт JSON с msg.data (base64)
                 var jo = JsonConvert.DeserializeObject<JObject>(e.Data);
                 var msg = jo?["msg"];
                 if (msg == null) return;
                 var dataToken = msg["data"];
                 if (dataToken == null) return;
 
-                // data может быть строкой base64 или уже бинарём при BSON — но через ws обычно base64
                 string b64 = dataToken.Value<string>();
                 if (string.IsNullOrEmpty(b64)) return;
 
-                // Быстрое декодирование base64 -> byte[]
-                // Convert.FromBase64String создаёт новый массив; можно переисп. ArrayPool, но для простоты так:
                 byte[] jpegBytes = Convert.FromBase64String(b64);
 
                 receivedFrames++;
 
-                // drop old frames если очередь забита
                 while (frameQueue.Count >= maxQueueFrames && frameQueue.TryDequeue(out _))
                     droppedFrames++;
 
@@ -160,8 +153,6 @@ public class RosbridgeImageSubscriber : MonoBehaviour
 
     void DecoderLoop()
     {
-        // В этом потоке мы НИЧЕГО не делаем с Unity API.
-        // Мы только берём последний JPEG/PNG из очереди и кладём его в latestDecoded.
         while (running)
         {
             if (!frameQueue.TryDequeue(out var encoded))
@@ -169,18 +160,15 @@ public class RosbridgeImageSubscriber : MonoBehaviour
                 Thread.Sleep(1);
                 continue;
             }
-            // Просто держим последний принятый кадр (переступаем через медленные декоды)
             latestDecoded = encoded;
         }
     }
 
     void Update()
     {
-        // Раз в кадр пробуем, есть ли новый JPEG/PNG для показа
         var toApply = latestDecoded;
         if (toApply == null || toApply.Length == 0) return;
 
-        // Создаём/переиспользуем Texture2D
         if (texture == null)
         {
             texture = new Texture2D(2, 2, TextureFormat.RGB24, false, false);
@@ -189,8 +177,6 @@ public class RosbridgeImageSubscriber : MonoBehaviour
             AssignTextureToTarget(texture);
         }
 
-        // Важно: ImageConversion.LoadImage выполняет декод JPEG/PNG на CPU + загружает в Texture2D
-        // Он должен вызываться на главном потоке Unity.
         bool ok = ImageConversion.LoadImage(texture, toApply, markNonReadable: true);
         if (ok && !currentConnectionState)
         {
@@ -205,7 +191,6 @@ public class RosbridgeImageSubscriber : MonoBehaviour
 
         latestDecoded = null;
 
-        // Простейшая статистика (по желанию)
         if (Time.unscaledTime - lastStatTime > 2f)
         {
             Debug.Log($"[ROS] recv={receivedFrames} drop={droppedFrames} tex={texture.width}x{texture.height}");

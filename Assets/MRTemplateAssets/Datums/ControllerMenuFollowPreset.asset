@@ -16,7 +16,7 @@ MonoBehaviour:
   m_ReadOnly: 1
   m_Value:
     rightHandLocalPosition: {x: 0, y: -0.17, z: 0}
-    leftHandLocalPosition: {x: 0, y: -0.17, z: -0.1}
+    leftHandLocalPosition: {x: 0, y: -0.17, z: 0}
     rightHandLocalRotation: {x: 0, y: 90, z: 90}
     leftHandLocalRotation: {x: 0, y: -90, z: -90}
     palmReferenceAxis: 0

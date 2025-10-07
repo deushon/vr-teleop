@@ -15,18 +15,18 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
     public string wsUrl = "ws://192.168.1.100:9090";
     public string poseArrayTopic = "/quest/poses";   // geometry_msgs/PoseArray
     public string jointStateTopic = "/quest/joints"; // sensor_msgs/JointState
-    public string poseFrameId = "unity_world";       // header.frame_id для PoseArray
-    public string headFrameId = "head";              // логический ид головы (для читаемости в отладке)
+    public string poseFrameId = "unity_world";       // header.frame_id for PoseArray
+    public string headFrameId = "head";              // logic head id
 
     [Header("XR")]
-    public Camera xrCamera; // укажите Main Camera из XR Origin
+    public Camera xrCamera;
 
     [Header("Rate")]
     [Range(1, 120)] public float sendHz = 10f;
 
     [Header("Debug")]
     public bool debugPrint = true;
-    [Tooltip("Пауза после потери контроллеров, прежде чем переключаться на руки")]
+    [Tooltip("Pause after loosing controller tracking, before switching to hands")]
     public float handsGraceSeconds = 0.25f;
 
     private WebSocket ws;
