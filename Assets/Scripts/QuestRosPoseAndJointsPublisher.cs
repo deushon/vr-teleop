@@ -15,18 +15,18 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
     public string wsUrl = "ws://192.168.1.100:9090";
     public string poseArrayTopic = "/quest/poses";   // geometry_msgs/PoseArray
     public string jointStateTopic = "/quest/joints"; // sensor_msgs/JointState
-    public string poseFrameId = "unity_world";       // header.frame_id для PoseArray
-    public string headFrameId = "head";              // логический ид головы (для читаемости в отладке)
+    public string poseFrameId = "unity_world";       // header.frame_id for PoseArray
+    public string headFrameId = "head";              // logic head id
 
     [Header("XR")]
-    public Camera xrCamera; // укажите Main Camera из XR Origin
+    public Camera xrCamera;
 
     [Header("Rate")]
     [Range(1, 120)] public float sendHz = 10f;
 
     [Header("Debug")]
     public bool debugPrint = true;
-    [Tooltip("Пауза после потери контроллеров, прежде чем переключаться на руки")]
+    [Tooltip("Pause after loosing controller tracking, before switching to hands")]
     public float handsGraceSeconds = 0.25f;
 
     private WebSocket ws;
@@ -162,7 +162,7 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
         var names = new List<string>();
         var vals = new List<float>();
 
-        // --- Controllers: grip/index + A/B/X/Y ---
+        // --- Controllers: analogs (grip, index) ---
         Action<string, string, InputDevice> AddCtrlAnalog = (side, key, dev) =>
         {
             float v = 0f;
@@ -174,6 +174,7 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
             names.Add($"{side}_{key}"); vals.Add(v);
         };
 
+        // --- Controllers: buttons A/B/X/Y ---
         Action<string, InputDevice, bool> AddCtrlButtons = (side, dev, isLeft) =>
         {
             float v;
@@ -182,6 +183,18 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
 
             v = ReadBoolAsFloat(dev, CommonUsages.secondaryButton); // Y (L) / B (R)
             names.Add($"{side}_{(isLeft ? "Y" : "B")}"); vals.Add(v);
+        };
+
+        // --- Controllers: sticks (axes + click/touch) ---
+        Action<string, InputDevice> AddCtrlStick = (side, dev) =>
+        {
+            Vector2 axis = Read2DAxis(dev); // primary2DAxis, fallback secondary2DAxis
+            names.Add($"{side}_stick_x"); vals.Add(axis.x);
+            names.Add($"{side}_stick_y"); vals.Add(axis.y);
+
+            // click/touch if available
+            names.Add($"{side}_stick_click"); vals.Add(ReadBoolAsFloat(dev, CommonUsages.primary2DAxisClick));
+            names.Add($"{side}_stick_touch"); vals.Add(ReadBoolAsFloat(dev, CommonUsages.primary2DAxisTouch));
         };
 
         // --- Hands: try vendor/usages for squeeze ---
@@ -216,13 +229,19 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
 
         if (useControllers)
         {
+            // analog buttons
             AddCtrlAnalog("L", "grip", leftCtrl);
             AddCtrlAnalog("L", "index", leftCtrl);
             AddCtrlAnalog("R", "grip", rightCtrl);
             AddCtrlAnalog("R", "index", rightCtrl);
 
+            // buttons
             AddCtrlButtons("L", leftCtrl, true);
             AddCtrlButtons("R", rightCtrl, false);
+
+            // sticks
+            AddCtrlStick("L", leftCtrl);
+            AddCtrlStick("R", rightCtrl);
         }
         else if (useHands)
         {
@@ -352,6 +371,16 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
     {
         if (dev.isValid && dev.TryGetFeatureValue(usage, out bool b)) return b ? 1f : 0f;
         return 0f;
+    }
+
+    // Read stick axis: primary2DAxis with reserve secondary2DAxis
+    static Vector2 Read2DAxis(InputDevice dev)
+    {
+        Vector2 v = Vector2.zero;
+        if (!dev.isValid) return v;
+        if (dev.TryGetFeatureValue(CommonUsages.primary2DAxis, out Vector2 a)) v = a;
+        if (v == Vector2.zero) dev.TryGetFeatureValue(CommonUsages.secondary2DAxis, out v);
+        return v;
     }
 
     static JObject PoseJson(Vector3 p, Quaternion q)

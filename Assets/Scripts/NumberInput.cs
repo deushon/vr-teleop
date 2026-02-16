@@ -58,6 +58,7 @@ public class NumberInput : MonoBehaviour
     {
         inputText = null;
         ChangeState(false);
+        FindFirstObjectByType<SaveData>().Save();
     }
 
     private void ChangeState(bool state)
