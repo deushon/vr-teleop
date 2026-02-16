@@ -1,50 +1,46 @@
 using UnityEngine;
 
-/// <summary>
-/// Плавно держит объект перед головой пользователя: слегка "подвешен" и догоняет при поворотах.
-/// Работает и в симуляторе, и на устройстве. Кидай на объект-экран.
-/// </summary>
 public class SoftHeadFollower : MonoBehaviour
 {
     [Header("Head (camera)")]
-    public Transform head;                // сюда передай Transform головы/камеры
+    public Transform head;
 
     [Header("Target offset (relative to head)")]
-    [Tooltip("Дистанция по взгляду")]
+    [Tooltip("Distance along the gaze direction")]
     public float distance = 1.8f;
-    [Tooltip("Вертикальный сдвиг вверх от линии взгляда")]
+    [Tooltip("Vertical offset upward from gaze line")]
     public float verticalOffset = -0.05f;
-    [Tooltip("Горизонтальный сдвиг (вправо +, влево -)")]
+    [Tooltip("Horizontal offset (right +, left -)")]
     public float lateralOffset = 0.0f;
 
     [Header("Smoothing")]
-    [Tooltip("Время успокоения позиции (меньше — быстрее)")]
+    [Tooltip("Position damping time (smaller = faster)")]
     public float positionSmoothTime = 0.12f;
-    [Tooltip("Макс. линейная скорость (м/с), 0 = без ограничения")]
+    [Tooltip("Max linear speed (m/s), 0 = unlimited")]
     public float maxPositionSpeed = 4.0f;
-    [Tooltip("Угловое сглаживание (сек). 0.1–0.2 даёт «мягко»")]
+    [Tooltip("Angular smoothing time (sec). 0.1–0.2 gives a 'soft' feel")]
     public float rotationSmoothTime = 0.10f;
 
     [Header("Gaze catch-up")]
-    [Tooltip("Порог угла (в градусах), после которого усиливаем догон")]
+    [Tooltip("Angle threshold (degrees) beyond which rotation accelerates")]
     public float catchUpAngle = 35f;
-    [Tooltip("Множитель ускорения поворота при большом расхождении")]
+    [Tooltip("Rotation acceleration multiplier when exceeding threshold")]
     public float catchUpBoost = 2.0f;
 
     [Header("Bounds")]
-    [Tooltip("Мин/макс дистанция от головы")]
+    [Tooltip("Min/max distance from the head")]
     public Vector2 distanceClamp = new Vector2(0.5f, 5.0f);
 
-    // внутреннее состояние
-    Vector3 velocity;         // для SmoothDamp
-    Quaternion rotVel = Quaternion.identity; // псевдо-скорость для "сглаживания" кватерниона
-    float rotLerpVel;         // помогает делать экспоненциальное сглаживание поворота
+    // internal state
+    Vector3 velocity;                     // for SmoothDamp
+    Quaternion rotVel = Quaternion.identity; // pseudo velocity for quaternion smoothing
+    float rotLerpVel;                     // helps implement exponential rotation damping
 
     private bool blockVertical = true;
 
     void Reset()
     {
-        // Попытка найти основную камеру по умолчанию
+        // Try to find the main camera by default
         if (!head && Camera.main) head = Camera.main.transform;
     }
 
@@ -52,8 +48,8 @@ public class SoftHeadFollower : MonoBehaviour
     {
         if (!head) return;
 
-        // Целевая позиция относительно головы
-        Vector3 forward = blockVertical ? Flatten(head.forward).normalized : head.forward.normalized; // проекция на горизонт, чтобы панель не кувыркалась при наклоне головы
+        // Target position relative to the head
+        Vector3 forward = blockVertical ? Flatten(head.forward).normalized : head.forward.normalized; // project onto horizontal plane to prevent flipping when head tilts
         if (forward.sqrMagnitude < 1e-4f) forward = head.forward.normalized;
 
         Vector3 up = Vector3.up;
@@ -67,16 +63,16 @@ public class SoftHeadFollower : MonoBehaviour
             up * verticalOffset +
             right * lateralOffset;
 
-        // Плавное перемещение к целевой позиции
+        // Smoothly move toward the target position
         float maxSpeed = (maxPositionSpeed <= 0f) ? Mathf.Infinity : maxPositionSpeed;
         transform.position = Vector3.SmoothDamp(transform.position, targetPos, ref velocity, positionSmoothTime, maxSpeed, Time.deltaTime);
 
-        // Целевой поворот: смотреть на голову (чтобы панель «смотрела на пользователя»)
+        // Target rotation: face the head (so the panel "looks at the user")
         Vector3 toHead = (head.position - transform.position);
-        if (toHead.sqrMagnitude < 1e-6f) toHead = forward; // защита от нулевого вектора
-        Quaternion targetRot = Quaternion.LookRotation(-toHead.normalized, Vector3.up); // минус — лицом к пользователю
+        if (toHead.sqrMagnitude < 1e-6f) toHead = forward; // prevent zero vector
+        Quaternion targetRot = Quaternion.LookRotation(-toHead.normalized, Vector3.up); // minus = face toward the user
 
-        // Оценка рассогласования
+        // Compute angular difference
         float angDelta;
         {
             Quaternion delta = targetRot * Quaternion.Inverse(transform.rotation);
@@ -84,25 +80,25 @@ public class SoftHeadFollower : MonoBehaviour
             angDelta = (angle > 180f) ? 360f - angle : angle;
         }
 
-        // Экспоненциальное сглаживание поворота (похоже на SmoothDamp для угла)
-        // Чем меньше rotationSmoothTime, тем быстрее поворот.
+        // Exponential rotation smoothing (similar to SmoothDamp for angles)
+        // Smaller rotationSmoothTime = faster rotation
         float smooth = SmoothFactor(rotationSmoothTime, Time.deltaTime);
 
-        // Ускоряем догон, если пользователь резко повернулся (большое рассогласование)
+        // Speed up catch-up if user turns head sharply (large angle difference)
         if (angDelta > catchUpAngle) smooth = 1f - Mathf.Pow(1f - smooth, catchUpBoost);
 
         transform.rotation = Quaternion.Slerp(transform.rotation, targetRot, smooth);
     }
 
-    /// <summary>Экспоненциальный коэффициент сглаживания для заданной константы времени.</summary>
+    /// <summary>Exponential smoothing factor for a given time constant.</summary>
     static float SmoothFactor(float timeConstant, float dt)
     {
-        if (timeConstant <= 1e-4f) return 1f; // мгновенно
-        // классическая формула 1 - exp(-dt / tau)
+        if (timeConstant <= 1e-4f) return 1f; // instant
+        // Classic formula: 1 - exp(-dt / tau)
         return 1f - Mathf.Exp(-dt / Mathf.Max(1e-4f, timeConstant));
     }
 
-    /// <summary>Убираем вертикальную составляющую — чтобы панель не «клевала» при наклоне головы.</summary>
+    /// <summary>Removes vertical component to keep panel level with the horizon.</summary>
     static Vector3 Flatten(Vector3 v)
     {
         v.y = 0f;

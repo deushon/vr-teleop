@@ -1,9 +1,10 @@
 using System;
+using System.Collections;
 using System.Collections.Concurrent;
 using System.Text;
 using System.Threading;
 using UnityEngine;
-using UnityEngine.UI; // если используешь RawImage для UI
+using UnityEngine.UI;
 using WebSocketSharp;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -12,233 +13,658 @@ using TMPro;
 public class RosbridgeImageSubscriber : MonoBehaviour
 {
     [Header("ROSBridge")]
-    public string wsUrl = "ws://192.168.1.100:9090"; // замени на IP робота
-    public string imageTopic = "/camera/image/compressed"; // часто так называется
+    public string wsUrl = "ws://192.168.1.100:9090";
+    public string imageTopic = "/camera/image/compressed";
 
     [Header("Target")]
-    public RawImage targetUI;          // либо
-    public Renderer targetRenderer;    // что-то одно из них
+    public RawImage targetUI;
+    public Renderer targetRenderer;
 
     [Header("Perf")]
-    [Tooltip("Ставит throttle_rate (мс) в subscribe. 0 = без дросселя.")]
+    [Tooltip("throttle_rate (ms) in subscribe. 0 = without drossel.")]
     public int subscribeThrottleMs = 0;
-    [Tooltip("Пропуск кадров, если не успеваем декодировать (0 = не пропускать).")]
     public int maxQueueFrames = 1;
+
+    [Header("Resilience")]
+    [Tooltip("Try to reconnect if loosing connection.")]
+    public bool autoReconnect = true;
+    [Tooltip("Pause before reconnection (sec).")]
+    public float reconnectDelaySec = 2f;
+    public float connectTimeoutSec = 10f;
+    public float pingIntervalSec = 5f;
 
     private WebSocket ws;
     private Texture2D texture;
     private readonly ConcurrentQueue<byte[]> frameQueue = new();
-    private readonly object textureLock = new();
     private Thread decodeThread;
     private volatile bool running;
-    private byte[] latestDecoded; // JPEG/PNG -> байты исходного файла (не raw)
-    private byte[] workingBuffer; // переисп. буфер под base64
+    private volatile bool isConnecting;
+    private volatile bool isConnected;
+    private volatile bool isStopping;
+    private volatile bool wantConnection; // (InitConnection -> true, StopConnection -> false)
 
-    // Опционально: статистика
+    private byte[] latestDecoded;
+
+    // Optional: stats
     private int receivedFrames;
     private int droppedFrames;
     private float lastStatTime;
 
     private bool currentConnectionState = false;
-    [SerializeField]
-    private GameObject EnableController;
-    [SerializeField]
-    private GameObject DisableController;
-    [SerializeField]
-    private GameObject DisconnectButton;
-    [SerializeField]
-    private GameObject PanelSettings;
+
+    [SerializeField] private GameObject EnableController;
+    [SerializeField] private GameObject DisableController;
+    [SerializeField] private GameObject DisconnectButton;
+    [SerializeField] private GameObject PanelSettings;
+
+    [SerializeField] private TMP_Text IpText;
+    [SerializeField] private TMP_Text PortText;
+    [SerializeField] private NumberInput numberInput;
+    [SerializeField] private QuestRosPoseAndJointsPublisher publisher;
 
     [SerializeField]
-    private TMP_Text IpText;
+    private AutoDestroyTMPText LogText;
+    private float lastPingTime;
 
-    [SerializeField]
-    private TMP_Text PortText;
+    // ======================== PUBLIC API ========================
 
-    [SerializeField]
-    private NumberInput numberInput;
-
-    [SerializeField]
-    private QuestRosPoseAndJointsPublisher publisher;
     public void InitConnection()
     {
-        wsUrl = $"ws://{IpText.text}:{PortText.text}";
-        numberInput.Lock = true;
-        IpText.color = Color.gray;
-        PortText.color = Color.gray;
-        Connect();
-        StartDecoderThread();
+        try
+        {
+            LogText.SetText("[ROS] Starting Connection");
+            wsUrl = $"ws://{IpText?.text}:{PortText?.text}";
+            numberInput.Lock = true;
+            if (IpText) IpText.color = Color.gray;
+            if (PortText) PortText.color = Color.gray;
+
+            wantConnection = true;
+            EnsureDecoderThread();
+            SafeConnect();
+        }
+        catch (Exception ex)
+        {
+            Debug.LogError($"[ROS] InitConnection exception: {ex}");
+            LogText.SetText($"[ROS] InitConnection exception: {ex}");
+        }
     }
 
     public void StopConnection()
     {
-        publisher.Disconnect();
-        SetState(false);
-        numberInput.Lock = false;
-        IpText.color = Color.white;
-        PortText.color = Color.white;
-        running = false;
-        try { decodeThread?.Join(200); } catch { /* ignore */ }
-        try { ws?.Close(); } catch { /* ignore */ }
-        Destroy(texture);
+        try
+        {
+            wantConnection = false;
+            isStopping = true;
+
+            try { publisher?.Disconnect(); } catch (Exception ex) 
+            {
+                Debug.LogWarning($"[ROS] publisher.Disconnect exception: {ex.Message}");
+                LogText.SetText($"[ROS] publisher.Disconnect exception: {ex.Message}");
+            }
+
+            SetState(false);
+
+            numberInput.Lock = false;
+            if (IpText) IpText.color = Color.white;
+            if (PortText) PortText.color = Color.white;
+
+            running = false;
+
+            try
+            {
+                if (decodeThread != null && decodeThread.IsAlive)
+                {
+                    if (!decodeThread.Join(300))
+                        decodeThread.Interrupt(); 
+                }
+            }
+            catch (Exception ex) 
+            {
+                Debug.LogWarning($"[ROS] decodeThread stop exception: {ex.Message}");
+                LogText.SetText($"[ROS] decodeThread stop exception: {ex.Message}");
+            }
+            finally { decodeThread = null; }
+
+            try
+            {
+                if (ws != null)
+                {
+                    UnsubscribeWsHandlers(ws);
+                    ws.CloseAsync();
+                    ws = null;
+                }
+            }
+            catch (Exception ex) 
+            {
+                Debug.LogWarning($"[ROS] ws.Close exception: {ex.Message}");
+                LogText.SetText($"[ROS] ws.Close exception: {ex.Message}");
+            }
+
+            try
+            {
+                while (frameQueue.TryDequeue(out _)) { }
+                latestDecoded = null;
+            }
+            catch (Exception ex) 
+            {
+                Debug.LogWarning($"[ROS] queue clear exception: {ex.Message}");
+                LogText.SetText($"[ROS] queue clear exception: {ex.Message}");
+            }
+
+            SafeDestroyTexture();
+
+            LogText.SetText($"[ROS] Connection stopped");
+            isConnected = false;
+        }
+        catch (Exception ex)
+        {
+            Debug.LogError($"[ROS] StopConnection exception: {ex}");
+            LogText.SetText($"[ROS] StopConnection exception: {ex}");
+        }
+        finally
+        {
+            isStopping = false;
+        }
     }
 
-    void OnDestroy()
+    // ======================== UNITY LIFECYCLE ========================
+
+    private void OnDestroy()
     {
         StopConnection();
     }
 
-    void Connect()
+    private void Update()
     {
-        ws = new WebSocket(wsUrl);
-        // Если rosbridge поддерживает permessage-deflate — включай (снижает трафик)
-        ws.Compression = WebSocketSharp.CompressionMethod.Deflate;
-
-        ws.OnOpen += (s, e) =>
+        try
         {
+            if (pingIntervalSec > 0f && isConnected && ws != null)
+            {
+                if (Time.unscaledTime - lastPingTime > pingIntervalSec)
+                {
+                    try
+                    {
+                        ws.Ping();
+                        lastPingTime = Time.unscaledTime;
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.LogWarning($"[ROS] StopConnection exception: {ex}");
+                        LogText.SetText($"[ROS] StopConnection exception: {ex}");
+                    }
+                }
+            }
+
+            var toApply = latestDecoded;
+            if (toApply == null || toApply.Length == 0) return;
+
+            if (texture == null)
+            {
+                try
+                {
+                    texture = new Texture2D(2, 2, TextureFormat.RGB24, false, false)
+                    {
+                        wrapMode = TextureWrapMode.Clamp,
+                        filterMode = FilterMode.Bilinear
+                    };
+                    AssignTextureToTarget(texture);
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogError($"[ROS] Texture init failed: {ex.Message}");
+                    LogText.SetText($"[ROS] Texture init failed: {ex.Message}");
+                    latestDecoded = null;
+                    return;
+                }
+            }
+
+            bool ok = false;
+            try
+            {
+                ok = ImageConversion.LoadImage(texture, toApply, markNonReadable: true);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[ROS] LoadImage exception: {ex.Message}");
+                LogText.SetText($"[ROS] LoadImage exception: {ex.Message}");
+                ok = false;
+            }
+
+            if (ok && !currentConnectionState)
+                SetState(true);
+            else if (!ok && currentConnectionState)
+                SetState(false);
+
+            if (!ok)
+            {
+                latestDecoded = null;
+                return;
+            }
+
+            latestDecoded = null;
+
+            if (Time.unscaledTime - lastStatTime > 2f)
+            {
+                Debug.Log($"[ROS] recv={receivedFrames} drop={droppedFrames} tex={texture.width}x{texture.height}");
+                receivedFrames = droppedFrames = 0;
+                lastStatTime = Time.unscaledTime;
+            }
+
+            if (autoReconnect && wantConnection && !isConnected && !isConnecting && !isStopping)
+            {
+                StartCoroutine(ReconnectAfterDelay(reconnectDelaySec));
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.LogError($"[ROS] Update exception: {ex}");
+            LogText.SetText($"[ROS] Update exception: {ex}");
+        }
+    }
+
+    // ======================== INTERNALS ========================
+
+    private void EnsureDecoderThread()
+    {
+        try
+        {
+            if (decodeThread != null && decodeThread.IsAlive)
+                return;
+
+            running = true;
+            decodeThread = new Thread(DecoderLoop) { IsBackground = true, Name = "ROS JPEG Decoder" };
+            decodeThread.Start();
+        }
+        catch (Exception ex)
+        {
+            Debug.LogError($"[ROS] EnsureDecoderThread exception: {ex}");
+            LogText.SetText($"[ROS] EnsureDecoderThread exception: {ex}");
+        }
+    }
+
+    private void DecoderLoop()
+    {
+        try
+        {
+            while (running)
+            {
+                try
+                {
+                    if (!frameQueue.TryDequeue(out var encoded))
+                    {
+                        Thread.Sleep(1);
+                        continue;
+                    }
+
+                    latestDecoded = encoded;
+                }
+                catch (ThreadInterruptedException)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogWarning($"[ROS] DecoderLoop iteration exception: {ex.Message}");
+                    LogText.SetText($"[ROS] DecoderLoop iteration exception: {ex.Message}");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.LogError($"[ROS] DecoderLoop fatal exception: {ex}");
+            LogText.SetText($"[ROS] DecoderLoop fatal exception: {ex}");
+        }
+    }
+
+    private void SafeConnect()
+    {
+        if (isConnecting || isConnected || !wantConnection) return;
+
+        try
+        {
+            ValidateWsUrl();
+
+            try
+            {
+                if (ws != null)
+                {
+                    UnsubscribeWsHandlers(ws);
+                    ws.CloseAsync();
+                }
+            }
+            catch (Exception ex) 
+            {
+                Debug.LogWarning($"[ROS] Pre-close previous ws exception: {ex.Message}");
+                LogText.SetText($"[ROS] Pre-close previous ws exception: {ex.Message}");
+            }
+
+            ws = new WebSocket(wsUrl)
+            {
+                Compression = CompressionMethod.Deflate,
+                EmitOnPing = true
+            };
+
+            SubscribeWsHandlers(ws);
+
+            isConnecting = true;
+            lastPingTime = Time.unscaledTime;
+
+            if (connectTimeoutSec > 0f)
+                StartCoroutine(ConnectWithTimeout(connectTimeoutSec));
+            else
+                ws.ConnectAsync();
+        }
+        catch (Exception ex)
+        {
+            isConnecting = false;
+            Debug.LogError($"[ROS] SafeConnect exception: {ex}");
+            LogText.SetText($"[ROS] SafeConnect exception: {ex}");
+            if (autoReconnect && wantConnection)
+                StartCoroutine(ReconnectAfterDelay(reconnectDelaySec));
+        }
+    }
+
+    private IEnumerator ConnectWithTimeout(float timeoutSec)
+    {
+        bool timedOut = false;
+        float start = Time.unscaledTime;
+
+        // Connection attempt ? extracted from try/catch with yield
+        bool connectOk = true;
+        try
+        {
+            ws.ConnectAsync();
+        }
+        catch (Exception ex)
+        {
+            isConnecting = false;
+            connectOk = false;
+            Debug.LogError($"[ROS] ConnectAsync threw: {ex}");
+            LogText.SetText($"[ROS] ConnectAsync threw: {ex}");
+        }
+
+        if (!connectOk)
+        {
+            if (autoReconnect && wantConnection)
+                yield return ReconnectAfterDelay(reconnectDelaySec);
+            yield break;
+        }
+
+        while (isConnecting && !isConnected)
+        {
+            if (Time.unscaledTime - start > timeoutSec)
+            {
+                timedOut = true;
+                break;
+            }
+            yield return null;
+        }
+
+        if (timedOut && ws != null)
+        {
+            Debug.LogWarning("[ROS] Connection timeout; closing and scheduling reconnect.");
+            LogText.SetText("[ROS] Connection timeout; closing and scheduling reconnect.");
+
+            try
+            {
+                ws.CloseAsync();
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[ROS] Close after timeout exception: {ex.Message}");
+                LogText.SetText($"[ROS] Close after timeout exception: {ex.Message}");
+            }
+
+            isConnecting = false;
+            isConnected = false;
+
+            if (autoReconnect && wantConnection)
+                yield return ReconnectAfterDelay(reconnectDelaySec);
+        }
+    }
+
+    private IEnumerator ReconnectAfterDelay(float delay)
+    {
+        if (isConnecting || isConnected || !wantConnection) yield break;
+
+        Debug.Log($"[ROS] Reconnecting in {delay:0.##} s...");
+        LogText.SetText($"[ROS] Reconnecting in {delay:0.##} s...");
+        yield return new WaitForSecondsRealtime(Mathf.Max(0.05f, delay));
+
+        if (!wantConnection) yield break;
+        SafeConnect();
+    }
+
+    private void SubscribeWsHandlers(WebSocket socket)
+    {
+        socket.OnOpen += OnWsOpen;
+        socket.OnMessage += OnWsMessage;
+        socket.OnError += OnWsError;
+        socket.OnClose += OnWsClose;
+    }
+
+    private void UnsubscribeWsHandlers(WebSocket socket)
+    {
+        socket.OnOpen -= OnWsOpen;
+        socket.OnMessage -= OnWsMessage;
+        socket.OnError -= OnWsError;
+        socket.OnClose -= OnWsClose;
+    }
+
+    // ======================== WS HANDLERS ========================
+
+    private void OnWsOpen(object sender, EventArgs e)
+    {
+        try
+        {
+            isConnected = true;
+            isConnecting = false;
             Debug.Log("[ROS] WebSocket opened");
-            // Подписка на CompressedImage
             var sub = new
             {
                 op = "subscribe",
                 topic = imageTopic,
                 type = "sensor_msgs/CompressedImage",
-                throttle_rate = subscribeThrottleMs // миллисекунды, можно 33 для около 30 FPS
+                throttle_rate = Mathf.Max(0, subscribeThrottleMs)
             };
-            ws.Send(JsonConvert.SerializeObject(sub));
-        };
 
-        ws.OnMessage += (s, e) =>
+            string payload = JsonConvert.SerializeObject(sub);
+            ws?.Send(payload);
+        }
+        catch (Exception ex)
         {
+            Debug.LogError($"[ROS] OnOpen exception: {ex}");
+            LogText.SetText($"[ROS] OnOpen exception: {ex}");
+        }
+    }
+
+    private void OnWsMessage(object sender, MessageEventArgs e)
+    {
+        try
+        {
+            if (!e.IsText)
+            {
+                Debug.LogWarning("[ROS] Non-text message received; ignoring.");
+                LogText.SetText("[ROS] Non-text message received; ignoring.");
+                return;
+            }
+
+            JObject jo = null;
             try
             {
-                // rosbridge шлёт JSON с msg.data (base64)
-                var jo = JsonConvert.DeserializeObject<JObject>(e.Data);
-                var msg = jo?["msg"];
-                if (msg == null) return;
-                var dataToken = msg["data"];
-                if (dataToken == null) return;
-
-                // data может быть строкой base64 или уже бинарём при BSON — но через ws обычно base64
-                string b64 = dataToken.Value<string>();
-                if (string.IsNullOrEmpty(b64)) return;
-
-                // Быстрое декодирование base64 -> byte[]
-                // Convert.FromBase64String создаёт новый массив; можно переисп. ArrayPool, но для простоты так:
-                byte[] jpegBytes = Convert.FromBase64String(b64);
-
-                receivedFrames++;
-
-                // drop old frames если очередь забита
-                while (frameQueue.Count >= maxQueueFrames && frameQueue.TryDequeue(out _))
-                    droppedFrames++;
-
-                frameQueue.Enqueue(jpegBytes);
+                jo = JsonConvert.DeserializeObject<JObject>(e.Data);
             }
             catch (Exception ex)
             {
-                Debug.LogWarning("[ROS] Parse error: " + ex.Message);
+                Debug.LogWarning($"[ROS] JSON parse error: {ex.Message}");
+                LogText.SetText($"[ROS] JSON parse error: {ex.Message}");
+                return;
             }
-        };
 
-        ws.OnError += (s, e) =>
-        {
-            Debug.LogWarning("[ROS] Error: " + e.Message);
-            StopConnection();
-        };
-        ws.OnClose += (s, e) => Debug.LogWarning("[ROS] Closed: " + e.Reason);
+            var msg = jo?["msg"];
+            if (msg == null) return;
 
-        ws.ConnectAsync();
-    }
+            var dataToken = msg["data"];
+            if (dataToken == null) return;
 
-    void StartDecoderThread()
-    {
-        running = true;
-        decodeThread = new Thread(DecoderLoop) { IsBackground = true };
-        decodeThread.Start();
-    }
+            string b64 = dataToken.Value<string>();
+            if (string.IsNullOrEmpty(b64)) return;
 
-    void DecoderLoop()
-    {
-        // В этом потоке мы НИЧЕГО не делаем с Unity API.
-        // Мы только берём последний JPEG/PNG из очереди и кладём его в latestDecoded.
-        while (running)
-        {
-            if (!frameQueue.TryDequeue(out var encoded))
+            byte[] jpegBytes = null;
+            try
             {
-                Thread.Sleep(1);
-                continue;
+                jpegBytes = Convert.FromBase64String(b64);
             }
-            // Просто держим последний принятый кадр (переступаем через медленные декоды)
-            latestDecoded = encoded;
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[ROS] Base64 decode error: {ex.Message}");
+                LogText.SetText($"[ROS] Base64 decode error: {ex.Message}");
+                return;
+            }
+
+            receivedFrames++;
+
+            if (maxQueueFrames > 0)
+            {
+                while (frameQueue.Count >= maxQueueFrames && frameQueue.TryDequeue(out _))
+                    droppedFrames++;
+            }
+
+            frameQueue.Enqueue(jpegBytes);
+        }
+        catch (Exception ex)
+        {
+            Debug.LogError($"[ROS] OnMessage exception: {ex}");
+            LogText.SetText($"[ROS] OnMessage exception: {ex}");
         }
     }
 
-    void Update()
+    private void OnWsError(object sender, ErrorEventArgs e)
     {
-        // Раз в кадр пробуем, есть ли новый JPEG/PNG для показа
-        var toApply = latestDecoded;
-        if (toApply == null || toApply.Length == 0) return;
-
-        // Создаём/переиспользуем Texture2D
-        if (texture == null)
+        try
         {
-            texture = new Texture2D(2, 2, TextureFormat.RGB24, false, false);
-            texture.wrapMode = TextureWrapMode.Clamp;
-            texture.filterMode = FilterMode.Bilinear;
-            AssignTextureToTarget(texture);
+            Debug.LogWarning($"[ROS] WS Error: {e.Message}");
+            LogText.SetText($"[ROS] WS Error: {e.Message}");
+            isConnected = false;
+            isConnecting = false;
+
+            if (!isStopping)
+                SetState(false);
+
+            if (autoReconnect && wantConnection && !isStopping)
+                StartCoroutine(ReconnectAfterDelay(reconnectDelaySec));
         }
-
-        // Важно: ImageConversion.LoadImage выполняет декод JPEG/PNG на CPU + загружает в Texture2D
-        // Он должен вызываться на главном потоке Unity.
-        bool ok = ImageConversion.LoadImage(texture, toApply, markNonReadable: true);
-        if (ok && !currentConnectionState)
+        catch (Exception ex)
         {
-            SetState(true);
+            Debug.LogError($"[ROS] OnError exception: {ex}");
+            LogText.SetText($"[ROS] OnError exception: {ex}");
         }
-        else if (!ok && currentConnectionState) 
+    }
+
+    private void OnWsClose(object sender, CloseEventArgs e)
+    {
+        try
         {
-            SetState(false);
+            Debug.LogWarning($"[ROS] WS Closed: code={e.Code}, reason={e.Reason}, clean={e.WasClean}");
+            LogText.SetText($"[ROS] WS Closed: code={e.Code}, reason={e.Reason}, clean={e.WasClean}");
+            isConnected = false;
+            isConnecting = false;
+
+            if (!isStopping)
+                SetState(false);
+
+            if (autoReconnect && wantConnection && !isStopping)
+                StartCoroutine(ReconnectAfterDelay(reconnectDelaySec));
         }
-        if (!ok) return;
-
-
-        latestDecoded = null;
-
-        // Простейшая статистика (по желанию)
-        if (Time.unscaledTime - lastStatTime > 2f)
+        catch (Exception ex)
         {
-            Debug.Log($"[ROS] recv={receivedFrames} drop={droppedFrames} tex={texture.width}x{texture.height}");
-            receivedFrames = droppedFrames = 0;
-            lastStatTime = Time.unscaledTime;
+            Debug.LogError($"[ROS] OnClose exception: {ex}");
+            LogText.SetText($"[ROS] OnClose exception: {ex}");
+        }
+    }
+
+    // ======================== HELPERS ========================
+
+    private void ValidateWsUrl()
+    {
+        if (string.IsNullOrWhiteSpace(wsUrl))
+            throw new ArgumentException("wsUrl is empty.");
+        if (!wsUrl.StartsWith("ws://") && !wsUrl.StartsWith("wss://"))
+            throw new ArgumentException($"wsUrl must start with ws:// or wss://, got: {wsUrl}");
+
+        try
+        {
+            var uri = new Uri(wsUrl);
+            if (uri.Port <= 0 || uri.Port > 65535)
+            {
+                LogText.SetText($"Invalid port in wsUrl: {uri.Port}");
+                throw new ArgumentException($"Invalid port in wsUrl: {uri.Port}");
+            }
+
+        }
+        catch (UriFormatException ex)
+        {
+            LogText.SetText($"Invalid wsUrl format: {wsUrl}. {ex.Message}");
+            throw new ArgumentException($"Invalid wsUrl format: {wsUrl}. {ex.Message}");
         }
     }
 
     private void AssignTextureToTarget(Texture2D tex)
     {
-        if (targetUI != null) targetUI.texture = tex;
-        if (targetRenderer != null) targetRenderer.material.mainTexture = tex;
+        try
+        {
+            if (targetUI != null) targetUI.texture = tex;
+            if (targetRenderer != null)
+            {
+                var mr = targetRenderer.material;
+                if (mr != null)
+                    mr.mainTexture = tex;
+            }
+        }
+        catch (Exception ex)
+        {
+            LogText.SetText($"[ROS] AssignTextureToTarget exception: {ex.Message}");
+            Debug.LogWarning($"[ROS] AssignTextureToTarget exception: {ex.Message}");
+        }
+    }
+
+    private void SafeDestroyTexture()
+    {
+        try
+        {
+            if (texture != null)
+            {
+                if (Application.isPlaying)
+                    Destroy(texture);
+                else
+                    DestroyImmediate(texture);
+                texture = null;
+            }
+        }
+        catch (Exception ex)
+        {
+            LogText.SetText($"[ROS] SafeDestroyTexture exception: {ex.Message}");
+            Debug.LogWarning($"[ROS] SafeDestroyTexture exception: {ex.Message}");
+        }
     }
 
     private void SetState(bool state)
     {
-        currentConnectionState = state;
-        targetUI.enabled = state;
-        if (EnableController != null)
+        try
         {
-            EnableController.SetActive(state);
+            currentConnectionState = state;
+
+            if (targetUI) targetUI.enabled = state;
+
+            if (EnableController) EnableController.SetActive(state);
+            if (DisconnectButton) DisconnectButton.SetActive(state);
+            if (PanelSettings) PanelSettings.SetActive(state);
+            if (DisableController) DisableController.SetActive(state);
         }
-        if (DisconnectButton != null)
+        catch (Exception ex)
         {
-            DisconnectButton.SetActive(state);
-        }
-        if (PanelSettings != null)
-        {
-            PanelSettings.SetActive(state);
-        }
-        if (DisableController != null)
-        {
-            DisableController.SetActive(state);
+            LogText.SetText($"[ROS] SetState exception: {ex.Message}");
+            Debug.LogWarning($"[ROS] SetState exception: {ex.Message}");
         }
     }
 }
