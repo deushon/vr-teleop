@@ -15,6 +15,10 @@ public class NumberInput : MonoBehaviour
     private DefaultTextValue textFields;
 
     public bool Lock = false;
+    public bool NeedToSave = false;
+
+    [SerializeField]
+    private Color defaultTextColor = Color.gray;
 
     public void InputText(string symbol)
     {
@@ -41,7 +45,7 @@ public class NumberInput : MonoBehaviour
             if (textFields.inputedValue == string.Empty)
             {
                 inputText.text = textFields.defaultValue;
-                inputText.color = Color.gray;
+                inputText.color = defaultTextColor;
             }
         }
     }
@@ -58,7 +62,10 @@ public class NumberInput : MonoBehaviour
     {
         inputText = null;
         ChangeState(false);
-        FindFirstObjectByType<SaveData>().Save();
+        if (NeedToSave)
+        {
+            FindFirstObjectByType<SaveData>().Save();
+        }
     }
 
     private void ChangeState(bool state)
