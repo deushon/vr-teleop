@@ -41,8 +41,9 @@ public class RosbridgeImageSubscriber : MonoBehaviour
     public float connectTimeoutSec = 10f;
     public float pingIntervalSec = 5f;
 
-    [SerializeField] private GameObject EnableController;
-    [SerializeField] private GameObject DisableController;
+    [SerializeField] private GameObject ShowDashboard;
+    [SerializeField] private GameObject CameraPanelSettings;
+    [SerializeField] private GameObject DashboardPanelSettings;
     [SerializeField] private GameObject DisconnectButton;
     [SerializeField] private GameObject PanelSettings;
 
@@ -929,11 +930,11 @@ public class RosbridgeImageSubscriber : MonoBehaviour
             currentConnectionState = state;
 
             if (targetUI) targetUI.enabled = state;
-
-            if (EnableController) EnableController.SetActive(state);
+            if (ShowDashboard) ShowDashboard.SetActive(state);
+            if (CameraPanelSettings) CameraPanelSettings.SetActive(state);
+            if (DashboardPanelSettings) DashboardPanelSettings.SetActive(state);
             if (DisconnectButton) DisconnectButton.SetActive(state);
-            if (PanelSettings) PanelSettings.SetActive(state);
-            if (DisableController) DisableController.SetActive(state);
+            //if (PanelSettings) PanelSettings.SetActive(state);
         }
         catch (Exception ex)
         {
