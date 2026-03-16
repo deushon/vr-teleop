@@ -2,6 +2,11 @@ using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
+using System.Text;
+using Newtonsoft.Json;
+using TMPro;
+using UnityEngine.Networking;
+using System.IO;
 
 public class DatasetManager : MonoBehaviour
 {
@@ -12,6 +17,12 @@ public class DatasetManager : MonoBehaviour
     [SerializeField] private Button sendRecordsButton;
     [SerializeField] private Button clearAllRecordsButton;
     [SerializeField] private TaskManager taskManager;
+
+    [SerializeField] private TMP_Text IpText;
+    [SerializeField] private int datasetServerPort = 9191;
+    [SerializeField] private string uploadDatasetPath = "/upload_dataset";
+
+    [SerializeField] private AutoDestroyTMPText LogText;
 
     private List<GameObject> currentRecords = new List<GameObject>();
 
@@ -28,6 +39,11 @@ public class DatasetManager : MonoBehaviour
     //}
 
     public void AddNewRecord()
+    {
+        AddNewRecord(null);
+    }
+
+    public void AddNewRecord(RecordedSession session)
     {
         if (recordUI == null)
         {
@@ -60,6 +76,8 @@ public class DatasetManager : MonoBehaviour
             return;
         }
 
+        recordData.SetRecordedSession(session);
+
         var activeTaskData = taskManager.GetActiveTaskData();
         if (activeTaskData != null)
         {
@@ -74,13 +92,13 @@ public class DatasetManager : MonoBehaviour
 
         LayoutRebuilder.ForceRebuildLayoutImmediate(parentForLayout);
         currentRecords.Add(record);
+
         if (!sendRecordsButton.interactable || !clearAllRecordsButton.interactable)
         {
             sendRecordsButton.interactable = true;
             clearAllRecordsButton.interactable = true;
         }
     }
-
     public void DeleteRecord(GameObject record)
     {
         currentRecords.Remove(record);
@@ -101,5 +119,70 @@ public class DatasetManager : MonoBehaviour
         }
         sendRecordsButton.interactable = false;
         clearAllRecordsButton.interactable = false;
+    }
+
+    public void SendAllRecords()
+    {
+        StartCoroutine(SendAllRecordsCoroutine());
+    }
+
+    private IEnumerator SendAllRecordsCoroutine()
+    {
+        if (IpText == null || string.IsNullOrWhiteSpace(IpText.text))
+        {
+            Debug.LogError("Robot IP is empty");
+            yield break;
+        }
+
+        string url = $"http://{IpText.text}:{datasetServerPort}{uploadDatasetPath}";
+
+        var payload = new DatasetUploadRequest
+        {
+            source = "unity_quest_dataset",
+            generatedUtcIso = System.DateTime.UtcNow.ToString("o")
+        };
+
+        foreach (var recordObj in currentRecords)
+        {
+            if (recordObj == null) continue;
+
+            var recordData = recordObj.GetComponent<RecordData>();
+            if (recordData == null) continue;
+
+            payload.records.Add(new DatasetUploadRecord
+            {
+                label = recordData.GetLabel(),
+                taskName = recordData.GetSelectedTaskName(),
+                data = recordData.GetRecordedSession()
+            });
+        }
+
+        string json = JsonConvert.SerializeObject(payload, Formatting.Indented);
+
+        //File.WriteAllText("test.json", json);
+        byte[] body = Encoding.UTF8.GetBytes(json);
+
+        using var request = new UnityWebRequest(url, UnityWebRequest.kHttpVerbPOST);
+        request.uploadHandler = new UploadHandlerRaw(body);
+        request.downloadHandler = new DownloadHandlerBuffer();
+        request.SetRequestHeader("Content-Type", "application/json");
+
+        LogText.SetText($"[Dataset] Uploading {payload.records.Count} records to {url}");
+        Debug.Log($"[Dataset] Uploading {payload.records.Count} records to {url}");
+
+        yield return request.SendWebRequest();
+
+        if (request.result == UnityWebRequest.Result.Success)
+        {
+            var message = $"[Dataset] Upload success: {request.downloadHandler.text}";
+            LogText.SetText(message);
+            Debug.Log(message);
+        }
+        else
+        {
+            var message = $"[Dataset] Upload failed: {request.result}, {request.error}\nResponse: {request.downloadHandler.text}";
+            LogText.SetText(message);
+            Debug.LogError(message);
+        }
     }
 }

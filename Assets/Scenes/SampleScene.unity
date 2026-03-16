@@ -31720,6 +31720,18 @@ MonoBehaviour:
   m_OnClick:
     m_PersistentCalls:
       m_Calls:
+      - m_Target: {fileID: 1371341519}
+        m_TargetAssemblyTypeName: QuestRosPoseAndJointsPublisher, Assembly-CSharp
+        m_MethodName: StartRecording
+        m_Mode: 1
+        m_Arguments:
+          m_ObjectArgument: {fileID: 0}
+          m_ObjectArgumentAssemblyTypeName: UnityEngine.Object, UnityEngine
+          m_IntArgument: 0
+          m_FloatArgument: 0
+          m_StringArgument: 
+          m_BoolArgument: 0
+        m_CallState: 2
       - m_Target: {fileID: 2114655573}
         m_TargetAssemblyTypeName: UnityEngine.UI.Selectable, UnityEngine.UI
         m_MethodName: set_interactable
@@ -43641,7 +43653,19 @@ MonoBehaviour:
   m_TargetGraphic: {fileID: 1698374256}
   m_OnClick:
     m_PersistentCalls:
-      m_Calls: []
+      m_Calls:
+      - m_Target: {fileID: 1584691900}
+        m_TargetAssemblyTypeName: DatasetManager, Assembly-CSharp
+        m_MethodName: SendAllRecords
+        m_Mode: 1
+        m_Arguments:
+          m_ObjectArgument: {fileID: 0}
+          m_ObjectArgumentAssemblyTypeName: UnityEngine.Object, UnityEngine
+          m_IntArgument: 0
+          m_FloatArgument: 0
+          m_StringArgument: 
+          m_BoolArgument: 0
+        m_CallState: 2
 --- !u!222 &833481811
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -74548,6 +74572,12 @@ MonoBehaviour:
   jointStateTopic: /quest/joints
   poseFrameId: unity_world
   headFrameId: head
+  enableRosTimeSync: 0
+  timeSyncRequestTopic: /quest/time_sync/request
+  timeSyncResponseTopic: /quest/time_sync/response
+  timeSyncIntervalSec: 5
+  debugTimeSync: 0
+  datasetManager: {fileID: 1584691900}
   xrCamera: {fileID: 1109407790274764220}
   sendHz: 10
   debugPrint: 1
@@ -85873,6 +85903,10 @@ MonoBehaviour:
   sendRecordsButton: {fileID: 833481810}
   clearAllRecordsButton: {fileID: 1640407196}
   taskManager: {fileID: 1486642249}
+  IpText: {fileID: 2021360255}
+  datasetServerPort: 9191
+  uploadDatasetPath: /upload_dataset
+  LogText: {fileID: 2033507711}
 --- !u!1 &1588394120
 GameObject:
   m_ObjectHideFlags: 0
@@ -94083,9 +94117,9 @@ MonoBehaviour:
           m_StringArgument: 
           m_BoolArgument: 1
         m_CallState: 2
-      - m_Target: {fileID: 1584691900}
-        m_TargetAssemblyTypeName: DatasetManager, Assembly-CSharp
-        m_MethodName: AddNewRecord
+      - m_Target: {fileID: 1371341519}
+        m_TargetAssemblyTypeName: QuestRosPoseAndJointsPublisher, Assembly-CSharp
+        m_MethodName: StopRecordingAndSave
         m_Mode: 1
         m_Arguments:
           m_ObjectArgument: {fileID: 0}

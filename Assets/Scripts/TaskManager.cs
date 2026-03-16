@@ -14,17 +14,17 @@ public class TaskManager : MonoBehaviour
 
     private TaskData activeSelection = null;
 
-    private IEnumerator Start()
-    {
-        yield return new WaitForSeconds(1f);
-        AddNewTask("Test");
-        yield return null;
-        AddNewTask("Test1");
-        yield return null;
-        AddNewTask("Test2");
-        yield return null;
-        AddNewTask("Test3");
-    }
+    //private IEnumerator Start()
+    //{
+    //    yield return new WaitForSeconds(1f);
+    //    AddNewTask("Test");
+    //    yield return null;
+    //    AddNewTask("Test1");
+    //    yield return null;
+    //    AddNewTask("Test2");
+    //    yield return null;
+    //    AddNewTask("Test3");
+    //}
 
     public void AddNewTask(string taskText)
     {

@@ -18,6 +18,16 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
     public string poseFrameId = "unity_world";       // header.frame_id for PoseArray
     public string headFrameId = "head";              // logic head id
 
+    [Header("ROS Time Sync")]
+    public bool enableRosTimeSync = true;
+    public string timeSyncRequestTopic = "/quest/time_sync/request";
+    public string timeSyncResponseTopic = "/quest/time_sync/response";
+    public float timeSyncIntervalSec = 5f;
+    public bool debugTimeSync = true;
+
+    [Header("Dataset Recording")]
+    [SerializeField] private DatasetManager datasetManager;
+
     [Header("XR")]
     public Camera xrCamera;
 
@@ -63,6 +73,18 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
     private float controllersLostAt = -999f;
     private bool dumpedHandFeaturesOnce;
 
+    private Coroutine timeSyncCoroutine;
+
+    private volatile bool rosTimeSynchronized;
+    private double rosClockOffsetSec; // ros_time - local_utc_time
+    private double lastSyncRttSec;
+
+    private string lastTimeSyncId;
+    private long lastTimeSyncLocalSendNs;
+
+    private bool isRecording;
+    private RecordedSession currentRecording;
+
     void Awake()
     {
         if (!xrCamera) xrCamera = Camera.main;
@@ -78,6 +100,9 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
 
         if (sendLoopCoroutine == null)
             sendLoopCoroutine = StartCoroutine(SendLoop());
+
+        if (enableRosTimeSync && timeSyncCoroutine == null)
+            timeSyncCoroutine = StartCoroutine(TimeSyncLoop());
     }
 
     public void Disconnect()
@@ -87,6 +112,18 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
             StopCoroutine(sendLoopCoroutine);
             sendLoopCoroutine = null;
         }
+
+        if (timeSyncCoroutine != null)
+        {
+            StopCoroutine(timeSyncCoroutine);
+            timeSyncCoroutine = null;
+        }
+
+        rosTimeSynchronized = false;
+        rosClockOffsetSec = 0.0;
+        lastSyncRttSec = 0.0;
+        lastTimeSyncId = null;
+        lastTimeSyncLocalSendNs = 0L;
 
         try
         {
@@ -116,14 +153,70 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
     {
         ws = new WebSocket(wsUrl);
         ws.Compression = WebSocketSharp.CompressionMethod.Deflate;
+
         ws.OnOpen += (_, __) =>
         {
             Debug.Log("[ROS TX] WS opened");
-            ws.Send(JsonConvert.SerializeObject(new { op = "advertise", topic = poseArrayTopic, type = "geometry_msgs/PoseArray", latch = false }));
-            ws.Send(JsonConvert.SerializeObject(new { op = "advertise", topic = jointStateTopic, type = "sensor_msgs/JointState", latch = false }));
+
+            ws.Send(JsonConvert.SerializeObject(new
+            {
+                op = "advertise",
+                topic = poseArrayTopic,
+                type = "geometry_msgs/PoseArray",
+                latch = false
+            }));
+
+            ws.Send(JsonConvert.SerializeObject(new
+            {
+                op = "advertise",
+                topic = jointStateTopic,
+                type = "sensor_msgs/JointState",
+                latch = false
+            }));
+
+            if (enableRosTimeSync)
+            {
+                ws.Send(JsonConvert.SerializeObject(new
+                {
+                    op = "advertise",
+                    topic = timeSyncRequestTopic,
+                    type = "std_msgs/String",
+                    latch = false
+                }));
+
+                ws.Send(JsonConvert.SerializeObject(new
+                {
+                    op = "subscribe",
+                    topic = timeSyncResponseTopic,
+                    type = "std_msgs/String"
+                }));
+            }
         };
+
+        ws.OnMessage += (_, e) =>
+        {
+            if (!e.IsText) return;
+
+            try
+            {
+                var jo = JsonConvert.DeserializeObject<JObject>(e.Data);
+                if (jo == null) return;
+
+                string topic = jo["topic"]?.Value<string>();
+                if (topic == timeSyncResponseTopic)
+                {
+                    HandleTimeSyncResponse(jo["msg"]);
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning("[ROS TX] OnMessage parse error: " + ex.Message);
+            }
+        };
+
         ws.OnError += (_, e) => Debug.LogWarning("[ROS TX] WS error: " + e.Message);
         ws.OnClose += (_, e) => Debug.LogWarning("[ROS TX] WS closed: " + e.Reason);
+
         ws.ConnectAsync();
     }
 
@@ -294,10 +387,34 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
         };
         Publish(jointStateTopic, "sensor_msgs/JointState", jointMsg);
 
+        var modeStr = useControllers ? "controllers" : useHands ? "hands" : "none";
+
+        if (isRecording && currentRecording != null)
+        {
+            currentRecording.frames.Add(new RecordedFrame
+            {
+                localUnixTimeNs = GetUnixTimeNs(),
+                localMonotonicSec = Time.realtimeSinceStartupAsDouble,
+
+                estimatedRosUnixTimeNs = GetEstimatedRosUnixTimeNs(),
+                rosClockOffsetSec = rosClockOffsetSec,
+                syncRttSec = lastSyncRttSec,
+                rosTimeSynchronized = rosTimeSynchronized,
+
+                inputMode = modeStr,
+
+                head = PoseFromToken(poses[0]),
+                left = PoseFromToken(poses[1]),
+                right = PoseFromToken(poses[2]),
+
+                joints = BuildJointValues(names, vals)
+            });
+        }
+
         if (debugPrint && Time.unscaledTime - lastDebug > 1f)
         {
             lastDebug = Time.unscaledTime;
-            var modeStr = useControllers ? "controllers" : useHands ? "hands" : "none";
+            
             float l0 = vals.Count > 0 ? vals[0] : 0f;
             float l1 = vals.Count > 1 ? vals[1] : 0f;
             Debug.Log($"[ROS TX] mode={modeStr} head=({headPosW.x:F2},{headPosW.y:F2},{headPosW.z:F2}) L0={l0:F2} L1={l1:F2} url={wsUrl} state={ws?.ReadyState}");
@@ -438,12 +555,11 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
         };
     }
 
-    static JObject RosHeader(string frameId)
+    JObject RosHeader(string frameId)
     {
-        var now = DateTimeOffset.UtcNow;
-        long nanos = now.ToUnixTimeMilliseconds() * 1_000_000;
-        int secs = (int)(nanos / 1_000_000_000);
-        int nsecs = (int)(nanos % 1_000_000_000);
+        long nanos = GetEstimatedRosUnixTimeNs();
+        int secs = (int)(nanos / 1_000_000_000L);
+        int nsecs = (int)(nanos % 1_000_000_000L);
 
         return new JObject
         {
@@ -461,5 +577,217 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
             ["msg"] = msg
         };
         ws.Send(envelope.ToString(Formatting.None));
+    }
+
+    static long GetUnixTimeNs()
+    {
+        return (DateTime.UtcNow - DateTime.UnixEpoch).Ticks * 100L; // 1 tick = 100 ns
+    }
+
+    long GetEstimatedRosUnixTimeNs()
+    {
+        long localNs = GetUnixTimeNs();
+        if (!rosTimeSynchronized)
+            return localNs;
+
+        return localNs + (long)(rosClockOffsetSec * 1_000_000_000.0);
+    }
+    void SendTimeSyncPing()
+    {
+        if (!enableRosTimeSync || ws == null || ws.ReadyState != WebSocketState.Open)
+            return;
+
+        lastTimeSyncId = Guid.NewGuid().ToString("N");
+        lastTimeSyncLocalSendNs = GetUnixTimeNs();
+
+        var payload = new JObject
+        {
+            ["ping_id"] = lastTimeSyncId,
+            ["client_send_unix_ns"] = lastTimeSyncLocalSendNs
+        };
+
+        var envelope = new JObject
+        {
+            ["op"] = "publish",
+            ["topic"] = timeSyncRequestTopic,
+            ["msg"] = new JObject
+            {
+                ["data"] = payload.ToString(Formatting.None)
+            }
+        };
+
+        ws.Send(envelope.ToString(Formatting.None));
+    }
+
+    void HandleTimeSyncResponse(JToken msg)
+    {
+        try
+        {
+            string json = msg?["data"]?.Value<string>();
+            if (string.IsNullOrWhiteSpace(json))
+                return;
+
+            var jo = JsonConvert.DeserializeObject<JObject>(json);
+            if (jo == null)
+                return;
+
+            string pingId = jo["ping_id"]?.Value<string>();
+            if (string.IsNullOrWhiteSpace(pingId))
+                return;
+
+            long clientSendNs = jo["client_send_unix_ns"]?.Value<long>() ?? 0L;
+            long robotRosUnixNs = jo["robot_ros_unix_ns"]?.Value<long>() ?? 0L;
+            if (clientSendNs == 0L || robotRosUnixNs == 0L)
+                return;
+
+            long clientRecvNs = GetUnixTimeNs();
+            long midpointNs = clientSendNs + (clientRecvNs - clientSendNs) / 2L;
+
+            double measuredOffsetSec = (robotRosUnixNs - midpointNs) / 1_000_000_000.0;
+            double measuredRttSec = (clientRecvNs - clientSendNs) / 1_000_000_000.0;
+
+            if (!rosTimeSynchronized)
+            {
+                rosClockOffsetSec = measuredOffsetSec;
+            }
+            else
+            {
+                const double alpha = 0.15; // сглаживание
+                rosClockOffsetSec = rosClockOffsetSec * (1.0 - alpha) + measuredOffsetSec * alpha;
+            }
+
+            lastSyncRttSec = measuredRttSec;
+            rosTimeSynchronized = true;
+
+            if (debugTimeSync)
+            {
+                Debug.Log($"[ROS TX] Time sync OK: offset={rosClockOffsetSec:F6}s rtt={lastSyncRttSec:F4}s");
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning("[ROS TX] HandleTimeSyncResponse error: " + ex.Message);
+        }
+    }
+
+    IEnumerator TimeSyncLoop()
+    {
+        yield return new WaitForSecondsRealtime(0.25f);
+
+        while (true)
+        {
+            if (enableRosTimeSync)
+                SendTimeSyncPing();
+
+            yield return new WaitForSecondsRealtime(Mathf.Max(0.5f, timeSyncIntervalSec));
+        }
+    }
+
+    public void StartRecording()
+    {
+        currentRecording = new RecordedSession
+        {
+            startedLocalUnixTimeNs = GetUnixTimeNs(),
+            startedEstimatedRosUnixTimeNs = GetEstimatedRosUnixTimeNs(),
+            rosTimeWasSynchronizedAtStart = rosTimeSynchronized,
+            sourceWsUrl = wsUrl,
+            sourceSendHz = sendHz
+        };
+
+        isRecording = true;
+        Debug.Log("[ROS TX] Recording started");
+    }
+
+    public void StopRecordingAndSave()
+    {
+        if (!isRecording || currentRecording == null)
+            return;
+
+        currentRecording.endedLocalUnixTimeNs = GetUnixTimeNs();
+        currentRecording.endedEstimatedRosUnixTimeNs = GetEstimatedRosUnixTimeNs();
+        currentRecording.rosTimeWasSynchronizedAtEnd = rosTimeSynchronized;
+
+        var completed = currentRecording;
+
+        currentRecording = null;
+        isRecording = false;
+
+        if (datasetManager != null)
+        {
+            datasetManager.AddNewRecord(completed);
+        }
+        else
+        {
+            Debug.LogWarning("[ROS TX] DatasetManager is not assigned, recorded session is lost.");
+        }
+
+        Debug.Log("[ROS TX] Recording stopped");
+    }
+
+    private RecordedPose PoseFromToken(JToken poseToken)
+    {
+        if (poseToken == null)
+        {
+            return new RecordedPose
+            {
+                position = new JsonVec3 { x = 0f, y = 0f, z = 0f },
+                orientation = new JsonQuat { x = 0f, y = 0f, z = 0f, w = 1f }
+            };
+        }
+
+        return new RecordedPose
+        {
+            position = new JsonVec3
+            {
+                x = poseToken["position"]?["x"]?.Value<float>() ?? 0f,
+                y = poseToken["position"]?["y"]?.Value<float>() ?? 0f,
+                z = poseToken["position"]?["z"]?.Value<float>() ?? 0f
+            },
+            orientation = new JsonQuat
+            {
+                x = poseToken["orientation"]?["x"]?.Value<float>() ?? 0f,
+                y = poseToken["orientation"]?["y"]?.Value<float>() ?? 0f,
+                z = poseToken["orientation"]?["z"]?.Value<float>() ?? 0f,
+                w = poseToken["orientation"]?["w"]?.Value<float>() ?? 1f
+            }
+        };
+    }
+
+    List<RecordedJointValue> BuildJointValues(List<string> names, List<float> vals)
+    {
+        var result = new List<RecordedJointValue>(Mathf.Min(names.Count, vals.Count));
+        int count = Mathf.Min(names.Count, vals.Count);
+
+        for (int i = 0; i < count; i++)
+        {
+            result.Add(new RecordedJointValue
+            {
+                name = names[i],
+                value = vals[i]
+            });
+        }
+
+        return result;
+    }
+
+    private JsonVec3 ToJsonVec3(Vector3 v)
+    {
+        return new JsonVec3
+        {
+            x = v.x,
+            y = v.y,
+            z = v.z
+        };
+    }
+
+    private JsonQuat ToJsonQuat(Quaternion q)
+    {
+        return new JsonQuat
+        {
+            x = q.x,
+            y = q.y,
+            z = q.z,
+            w = q.w
+        };
     }
 }
