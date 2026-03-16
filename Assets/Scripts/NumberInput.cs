@@ -18,12 +18,15 @@ public class NumberInput : MonoBehaviour
     public bool NeedToSave = false;
     public bool NeedToChangeColorInDefault = false;
 
+    public int inputLimit = 15;
+
     [SerializeField]
     private Color defaultTextColor = Color.gray;
     [SerializeField]
     private Color activeTextColor = Color.white;
     [SerializeField]
     private Color disabledTextColor = Color.white;
+
 
     public void InputText(string symbol)
     {
@@ -34,7 +37,7 @@ public class NumberInput : MonoBehaviour
                 inputText.text = string.Empty;
                 inputText.color = activeTextColor;
             }
-            if (inputText.text.Length < 15)
+            if ((inputLimit > 0 && inputText.text.Length < inputLimit) || inputLimit == 0)
             {
                 textFields.inputedValue += symbol;
                 inputText.text = textFields.inputedValue;
@@ -72,6 +75,15 @@ public class NumberInput : MonoBehaviour
             inputText.color = activeTextColor;
         }
         ChangeState(true);
+    }
+
+    public void SilentInput(TMP_Text text, string data)
+    {
+        if (data.Length == 0) return;
+        var textFieldsLocal = text.GetComponent<DefaultTextValue>();
+        textFieldsLocal.inputedValue += data;
+        text.text = textFieldsLocal.inputedValue;
+        text.color = disabledTextColor;
     }
 
     public void Deactivate()

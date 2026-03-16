@@ -21,6 +21,10 @@ public class RosbridgeImageSubscriber : MonoBehaviour
     public TMP_Text batteryText;
     public Image batteryIcon;
 
+    [Header("Task")]
+    public string taskTopic = "/task";
+    [SerializeField] private TaskManager taskManager;
+
     [Header("Target")]
     public RawImage targetUI;
     public Renderer targetRenderer;
@@ -281,6 +285,11 @@ public class RosbridgeImageSubscriber : MonoBehaviour
             batteryTopic,
             "std_msgs/UInt16",
             HandleBatteryMessage
+        );
+        RegisterSubscription(
+            taskTopic,
+            "std_msgs/String",
+            HandleTaskMessage
         );
     }
 
@@ -771,6 +780,50 @@ public class RosbridgeImageSubscriber : MonoBehaviour
             Debug.LogWarning($"[ROS] Battery parse error: {ex.Message}");
             SafeLog($"[ROS] Battery parse error: {ex.Message}");
         }
+    }
+
+    private void HandleTaskMessage(JToken msg)
+    {
+        var dataToken = msg["data"];
+        if (dataToken == null) return;
+
+        string taskText;
+        try
+        {
+            taskText = dataToken.Value<string>();
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning($"[ROS] Task parse error: {ex.Message}");
+            SafeLog($"[ROS] Task parse error: {ex.Message}");
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(taskText))
+            return;
+
+        RunOnMainThread(() =>
+        {
+            try
+            {
+                if (isDestroyedOrQuitting) return;
+                if (!this) return;
+
+                if (taskManager == null)
+                {
+                    Debug.LogWarning("[ROS] TaskManager is not assigned.");
+                    SafeLog("[ROS] TaskManager is not assigned.");
+                    return;
+                }
+                SafeLog($"[ROS] New task received: {taskText}");
+                taskManager.AddNewTask(taskText);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[ROS] TaskManager.AddNewTask exception: {ex.Message}");
+                SafeLog($"[ROS] TaskManager.AddNewTask exception: {ex.Message}");
+            }
+        });
     }
 
     // ======================== UPDATE STEPS ========================

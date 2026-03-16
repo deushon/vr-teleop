@@ -8,9 +8,15 @@ public class RecordData : MonoBehaviour
 {
     public Button InputTextButton;
     public TMP_Text TextField;
+    private TaskData selectedTask = null;
 
     public void DestroyRecord()
     {
         FindFirstObjectByType<DatasetManager>().DeleteRecord(gameObject);
+    }
+
+    public void SetSelectedTask(TaskData task)
+    {
+        selectedTask = task;
     }
 }

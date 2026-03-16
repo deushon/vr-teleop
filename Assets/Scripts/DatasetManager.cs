@@ -11,6 +11,7 @@ public class DatasetManager : MonoBehaviour
 
     [SerializeField] private Button sendRecordsButton;
     [SerializeField] private Button clearAllRecordsButton;
+    [SerializeField] private TaskManager taskManager;
 
     private List<GameObject> currentRecords = new List<GameObject>();
 
@@ -57,6 +58,13 @@ public class DatasetManager : MonoBehaviour
         {
             Debug.LogError("No RecordData was found");
             return;
+        }
+
+        var activeTaskData = taskManager.GetActiveTaskData();
+        if (activeTaskData != null)
+        {
+            recordData.SetSelectedTask(activeTaskData);
+            keyboardManager.SilentInput(recordData.TextField, activeTaskData.TextField.text);
         }
 
         recordData.InputTextButton.onClick.AddListener(() =>
