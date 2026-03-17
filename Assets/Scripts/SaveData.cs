@@ -9,6 +9,7 @@ public class IPData
 {
     public string ip;
     public string port;
+    public string restApiPort;
 }
 
 [System.Serializable]
@@ -24,6 +25,8 @@ public class SaveData : MonoBehaviour
     private DefaultTextValue IpText;
     [SerializeField]
     private DefaultTextValue PortText;
+    [SerializeField]
+    private DefaultTextValue RestApiPortText;
 
     private void Awake()
     {
@@ -37,7 +40,8 @@ public class SaveData : MonoBehaviour
         IPData ipData = new()
         {
             ip = IpText.inputedValue,
-            port = PortText.inputedValue
+            port = PortText.inputedValue, 
+            restApiPort = RestApiPortText.inputedValue
         };
         DataForSave data = new()
         {
@@ -51,23 +55,35 @@ public class SaveData : MonoBehaviour
     public void Load()
     {
         if (!File.Exists(jsonPath)) return;
-        DataForSave loadedData = 
+
+        DataForSave loadedData =
             JsonUtility.FromJson<DataForSave>(File.ReadAllText(jsonPath));
 
-        IpText.inputedValue = loadedData.ipData.ip;
-        PortText.inputedValue = loadedData.ipData.port;
+        if (loadedData == null || loadedData.ipData == null)
+            return;
 
-        if (IpText.inputedValue != "")
+        if (!string.IsNullOrEmpty(loadedData.ipData.ip))
         {
+            IpText.inputedValue = loadedData.ipData.ip;
             var ipTMP = IpText.GetComponent<TMP_Text>();
             ipTMP.text = IpText.inputedValue;
             ipTMP.color = Color.white;
         }
-        if (PortText.inputedValue != "")
+
+        if (!string.IsNullOrEmpty(loadedData.ipData.port))
         {
+            PortText.inputedValue = loadedData.ipData.port;
             var portTMP = PortText.GetComponent<TMP_Text>();
             portTMP.text = PortText.inputedValue;
             portTMP.color = Color.white;
+        }
+
+        if (!string.IsNullOrEmpty(loadedData.ipData.restApiPort))
+        {
+            RestApiPortText.inputedValue = loadedData.ipData.restApiPort;
+            var portRestTMP = RestApiPortText.GetComponent<TMP_Text>();
+            portRestTMP.text = RestApiPortText.inputedValue;
+            portRestTMP.color = Color.white;
         }
     }
 }

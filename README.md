@@ -145,9 +145,29 @@ To adapt this application for different robots:
 - Check firewall settings
 - Verify ROSBridge port (default 9090) is accessible
 
+## New Features (v1.1.0)
+
+### Dataset Recording & .hbr Format
+
+The application now supports **dataset recording** for training robots and AI agents. The VR headset records operator commands (head and controller poses) in the **.hbr** format—an erobot-compatible dataset format. Robot-side data (camera, IMU, motors) is collected by the daemon on the robot; datasets are sent to the robot after recording completes.
+
+- **Control panel**: Toggle robot control on/off, view battery status, and receive notifications from the robot
+- **Task system**: Receive tasks from the [Task Router (x402)](https://github.com/homebrewroboticsclub/Task-router-x402) via the connected robot; operators can accept tasks, execute them, and collect training data
+- **Dataset workflow**: Incoming tasks panel for accepting/removing tasks; recording panel (active when control is enabled) for capturing head and controller data; labels assigned from task names; datasets can be uploaded to the server
+- **NTP-synchronized timestamps**: All recordings use NTP-synchronized timestamps for alignment with robot data
+- **Hand orientation fix**: Local coordinate system for hands depends only on head position, not head tilt angle
+
+### Task Router Integration
+
+When connected to a robot that integrates with [Task-router-x402](https://github.com/homebrewroboticsclub/Task-router-x402), the operator can:
+- Receive data-collection or teleoperation tasks initiated by the robot or an AI agent
+- Execute tasks and record datasets for training
+- Participate in the x402 payment flow for economically incentivized data collection
+
 ## Related Projects
 
 - **[teleop_fetch ROS Package](../teleop_fetch-AngelsContr)** - Robot-side ROS implementation for Brewie robot
+- **[Task-router-x402](https://github.com/homebrewroboticsclub/Task-router-x402)** - Orchestration service for robots and agents with x402 payment integration
 
 
 ## Authors
@@ -156,5 +176,4 @@ Homebrew Robotics Club
 
 ## Version
 
-1.0.0
-
+1.1.0

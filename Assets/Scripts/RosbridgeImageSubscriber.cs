@@ -1,7 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Concurrent;
-using System.Text;
+using System.Collections.Generic;
 using System.Threading;
 using UnityEngine;
 using UnityEngine.UI;
@@ -16,44 +16,51 @@ public class RosbridgeImageSubscriber : MonoBehaviour
     public string wsUrl = "ws://192.168.1.100:9090";
     public string imageTopic = "/camera/image/compressed";
 
+    [Header("Battery")]
+    public string batteryTopic = "/ros_robot_controller/battery";
+    public TMP_Text batteryText;
+    public Image batteryIcon;
+
+    [Header("Task")]
+    public string taskTopic = "/task";
+    [SerializeField] private TaskManager taskManager;
+
     [Header("Target")]
     public RawImage targetUI;
     public Renderer targetRenderer;
 
+    [Header("Video")]
+    [Tooltip("Maximum rate of applying decoded JPEG frames to Unity texture.")]
+    public float maxApplyFps = 15f;
+
     [Header("Perf")]
-    [Tooltip("throttle_rate (ms) in subscribe. 0 = without drossel.")]
+    [Tooltip("throttle_rate (ms) in ROS subscribe for image topic. 0 = no throttle.")]
     public int subscribeThrottleMs = 0;
-    public int maxQueueFrames = 1;
 
     [Header("Resilience")]
-    [Tooltip("Try to reconnect if loosing connection.")]
+    [Tooltip("Try to reconnect if connection is lost.")]
     public bool autoReconnect = true;
     [Tooltip("Pause before reconnection (sec).")]
     public float reconnectDelaySec = 2f;
     public float connectTimeoutSec = 10f;
     public float pingIntervalSec = 5f;
 
-    private WebSocket ws;
-    private Texture2D texture;
-    private readonly ConcurrentQueue<byte[]> frameQueue = new();
-    private Thread decodeThread;
-    private volatile bool running;
-    private volatile bool isConnecting;
-    private volatile bool isConnected;
-    private volatile bool isStopping;
-    private volatile bool wantConnection; // (InitConnection -> true, StopConnection -> false)
+    [Header("Image Stream Watchdog")]
+    [Tooltip("How long to wait for the first image frame after subscribe.")]
+    public float firstImageTimeoutSec = 3f;
 
-    private byte[] latestDecoded;
+    [Tooltip("How long stream may stay silent after frames had already arrived.")]
+    public float imageSilenceTimeoutSec = 5f;
 
-    // Optional: stats
-    private int receivedFrames;
-    private int droppedFrames;
-    private float lastStatTime;
+    [Tooltip("How many times to retry image topic subscription before reconnecting whole socket.")]
+    public int maxImageResubscribeAttempts = 2;
 
-    private bool currentConnectionState = false;
+    [Tooltip("Try to recover image stream automatically.")]
+    public bool autoRecoverImageStream = true;
 
-    [SerializeField] private GameObject EnableController;
-    [SerializeField] private GameObject DisableController;
+    [SerializeField] private GameObject ShowDashboard;
+    [SerializeField] private GameObject CameraPanelSettings;
+    [SerializeField] private GameObject DashboardPanelSettings;
     [SerializeField] private GameObject DisconnectButton;
     [SerializeField] private GameObject PanelSettings;
 
@@ -61,10 +68,91 @@ public class RosbridgeImageSubscriber : MonoBehaviour
     [SerializeField] private TMP_Text PortText;
     [SerializeField] private NumberInput numberInput;
     [SerializeField] private QuestRosPoseAndJointsPublisher publisher;
+    [SerializeField] private AutoDestroyTMPText LogText;
 
-    [SerializeField]
-    private AutoDestroyTMPText LogText;
+    private WebSocket ws;
+    private Texture2D texture;
+
+    private readonly ConcurrentQueue<Action> mainThreadActions = new();
+    private readonly Dictionary<string, TopicSubscription> subscriptions = new();
+
+    private volatile bool isConnecting;
+    private volatile bool isConnected;
+    private volatile bool isStopping;
+    private volatile bool wantConnection;
+    private volatile bool isDestroyedOrQuitting;
+
+    private volatile ushort latestBatteryValue;
+    private volatile bool hasBatteryValue;
+
+    private byte[] latestEncodedFrame;
+    private readonly object latestFrameLock = new();
+
+    private int receivedFrames;
+    private int droppedFrames;
+    private int replacedFrames;
+    private float lastStatTime;
     private float lastPingTime;
+    private float lastFrameApplyTime;
+
+    private bool currentConnectionState = false;
+    private bool reconnectCoroutineScheduled = false;
+
+    private volatile bool hasReceivedAnyImageFrame;
+    private volatile bool waitingForFirstImage;
+    private volatile float lastImageMessageTime;
+
+    private Coroutine imageStartupWatchdogCoroutine;
+    private Coroutine imageSilenceWatchdogCoroutine;
+
+    private int imageResubscribeAttempts;
+
+    private sealed class TopicSubscription
+    {
+        public string Topic;
+        public string RosType;
+        public Action<JToken> Handler;
+        public int ThrottleRateMs;
+    }
+
+    // ======================== UNITY LIFECYCLE ========================
+
+    private void Awake()
+    {
+        RegisterSubscriptions();
+    }
+
+    private void OnApplicationQuit()
+    {
+        isDestroyedOrQuitting = true;
+    }
+
+    private void OnDestroy()
+    {
+        isDestroyedOrQuitting = true;
+        StopConnection();
+    }
+
+    private void Update()
+    {
+        FlushMainThreadActions();
+
+        try
+        {
+            if (isDestroyedOrQuitting) return;
+
+            UpdateBatteryUi();
+            UpdatePing();
+            ApplyLatestFrameIfNeeded();
+            PrintStatsIfNeeded();
+            ScheduleReconnectIfNeeded();
+        }
+        catch (Exception ex)
+        {
+            Debug.LogError($"[ROS] Update exception: {ex}");
+            SafeLog($"[ROS] Update exception: {ex.Message}");
+        }
+    }
 
     // ======================== PUBLIC API ========================
 
@@ -72,20 +160,27 @@ public class RosbridgeImageSubscriber : MonoBehaviour
     {
         try
         {
-            LogText.SetText("[ROS] Starting Connection");
-            wsUrl = $"ws://{IpText?.text}:{PortText?.text}";
-            numberInput.Lock = true;
+            if (isDestroyedOrQuitting) return;
+
+            RegisterSubscriptions();
+
+            SafeLog("[ROS] Starting connection");
+
+            string ip = IpText ? IpText.text : "";
+            string port = PortText ? PortText.text : "";
+            wsUrl = $"ws://{ip}:{port}";
+
+            if (numberInput) numberInput.Lock = true;
             if (IpText) IpText.color = Color.gray;
             if (PortText) PortText.color = Color.gray;
 
             wantConnection = true;
-            EnsureDecoderThread();
             SafeConnect();
         }
         catch (Exception ex)
         {
             Debug.LogError($"[ROS] InitConnection exception: {ex}");
-            LogText.SetText($"[ROS] InitConnection exception: {ex}");
+            SafeLog($"[ROS] InitConnection exception: {ex.Message}");
         }
     }
 
@@ -93,73 +188,64 @@ public class RosbridgeImageSubscriber : MonoBehaviour
     {
         try
         {
+            StopImageWatchdogs();
+            waitingForFirstImage = false;
+            hasReceivedAnyImageFrame = false;
+            imageResubscribeAttempts = 0;
+
             wantConnection = false;
             isStopping = true;
+            reconnectCoroutineScheduled = false;
 
-            try { publisher?.Disconnect(); } catch (Exception ex) 
+            try
+            {
+                publisher?.Disconnect();
+            }
+            catch (Exception ex)
             {
                 Debug.LogWarning($"[ROS] publisher.Disconnect exception: {ex.Message}");
-                LogText.SetText($"[ROS] publisher.Disconnect exception: {ex.Message}");
+                SafeLog($"[ROS] publisher.Disconnect exception: {ex.Message}");
             }
 
-            SetState(false);
+            if (!isDestroyedOrQuitting)
+            {
+                SetState(false);
 
-            numberInput.Lock = false;
-            if (IpText) IpText.color = Color.white;
-            if (PortText) PortText.color = Color.white;
+                if (numberInput) numberInput.Lock = false;
+                if (IpText) IpText.color = Color.white;
+                if (PortText) PortText.color = Color.white;
+            }
 
-            running = false;
+            isConnected = false;
+            isConnecting = false;
 
             try
             {
-                if (decodeThread != null && decodeThread.IsAlive)
-                {
-                    if (!decodeThread.Join(300))
-                        decodeThread.Interrupt(); 
-                }
-            }
-            catch (Exception ex) 
-            {
-                Debug.LogWarning($"[ROS] decodeThread stop exception: {ex.Message}");
-                LogText.SetText($"[ROS] decodeThread stop exception: {ex.Message}");
-            }
-            finally { decodeThread = null; }
+                var socket = ws;
+                ws = null;
 
-            try
-            {
-                if (ws != null)
+                if (socket != null)
                 {
-                    UnsubscribeWsHandlers(ws);
-                    ws.CloseAsync();
-                    ws = null;
+                    UnsubscribeWsHandlers(socket);
+                    socket.CloseAsync();
                 }
             }
-            catch (Exception ex) 
+            catch (Exception ex)
             {
                 Debug.LogWarning($"[ROS] ws.Close exception: {ex.Message}");
-                LogText.SetText($"[ROS] ws.Close exception: {ex.Message}");
+                SafeLog($"[ROS] ws.Close exception: {ex.Message}");
             }
 
-            try
-            {
-                while (frameQueue.TryDequeue(out _)) { }
-                latestDecoded = null;
-            }
-            catch (Exception ex) 
-            {
-                Debug.LogWarning($"[ROS] queue clear exception: {ex.Message}");
-                LogText.SetText($"[ROS] queue clear exception: {ex.Message}");
-            }
-
+            ClearLatestFrame();
             SafeDestroyTexture();
 
-            LogText.SetText($"[ROS] Connection stopped");
-            isConnected = false;
+            if (!isDestroyedOrQuitting)
+                SafeLog("[ROS] Connection stopped");
         }
         catch (Exception ex)
         {
             Debug.LogError($"[ROS] StopConnection exception: {ex}");
-            LogText.SetText($"[ROS] StopConnection exception: {ex}");
+            SafeLog($"[ROS] StopConnection exception: {ex.Message}");
         }
         finally
         {
@@ -167,158 +253,193 @@ public class RosbridgeImageSubscriber : MonoBehaviour
         }
     }
 
-    // ======================== UNITY LIFECYCLE ========================
-
-    private void OnDestroy()
+    public bool TryGetBatteryValue(out ushort value)
     {
-        StopConnection();
+        if (hasBatteryValue)
+        {
+            value = latestBatteryValue;
+            return true;
+        }
+
+        value = 0;
+        return false;
     }
 
-    private void Update()
+    public ushort BatteryValue => latestBatteryValue;
+    public bool HasBatteryValue => hasBatteryValue;
+
+    // ======================== SUBSCRIPTIONS ========================
+
+    private void RegisterSubscriptions()
     {
-        try
+        subscriptions.Clear();
+
+        RegisterSubscription(
+            imageTopic,
+            "sensor_msgs/CompressedImage",
+            HandleImageMessage,
+            subscribeThrottleMs < 0 ? 0 : subscribeThrottleMs
+        );
+
+        RegisterSubscription(
+            batteryTopic,
+            "std_msgs/UInt16",
+            HandleBatteryMessage
+        );
+        RegisterSubscription(
+            taskTopic,
+            "std_msgs/String",
+            HandleTaskMessage
+        );
+    }
+
+    private void RegisterSubscription(string topic, string rosType, Action<JToken> handler, int throttleRateMs = 0)
+    {
+        if (string.IsNullOrWhiteSpace(topic))
         {
-            if (pingIntervalSec > 0f && isConnected && ws != null)
+            Debug.LogWarning("[ROS] Tried to register empty topic.");
+            return;
+        }
+
+        if (handler == null)
+        {
+            Debug.LogWarning($"[ROS] Tried to register topic '{topic}' with null handler.");
+            return;
+        }
+
+        subscriptions[topic] = new TopicSubscription
+        {
+            Topic = topic,
+            RosType = rosType,
+            Handler = handler,
+            ThrottleRateMs = Mathf.Max(0, throttleRateMs)
+        };
+    }
+
+    private void SendSubscribe(TopicSubscription sub)
+    {
+        if (ws == null || sub == null) return;
+
+        object payload;
+        if (sub.ThrottleRateMs > 0)
+        {
+            payload = new
             {
-                if (Time.unscaledTime - lastPingTime > pingIntervalSec)
-                {
-                    try
-                    {
-                        ws.Ping();
-                        lastPingTime = Time.unscaledTime;
-                    }
-                    catch (Exception ex)
-                    {
-                        Debug.LogWarning($"[ROS] StopConnection exception: {ex}");
-                        LogText.SetText($"[ROS] StopConnection exception: {ex}");
-                    }
-                }
-            }
-
-            var toApply = latestDecoded;
-            if (toApply == null || toApply.Length == 0) return;
-
-            if (texture == null)
+                op = "subscribe",
+                topic = sub.Topic,
+                type = sub.RosType,
+                throttle_rate = sub.ThrottleRateMs
+            };
+        }
+        else
+        {
+            payload = new
             {
-                try
-                {
-                    texture = new Texture2D(2, 2, TextureFormat.RGB24, false, false)
-                    {
-                        wrapMode = TextureWrapMode.Clamp,
-                        filterMode = FilterMode.Bilinear
-                    };
-                    AssignTextureToTarget(texture);
-                }
-                catch (Exception ex)
-                {
-                    Debug.LogError($"[ROS] Texture init failed: {ex.Message}");
-                    LogText.SetText($"[ROS] Texture init failed: {ex.Message}");
-                    latestDecoded = null;
-                    return;
-                }
-            }
+                op = "subscribe",
+                topic = sub.Topic,
+                type = sub.RosType
+            };
+        }
 
-            bool ok = false;
+        string json = JsonConvert.SerializeObject(payload);
+        ws.Send(json);
+
+        Debug.Log($"[ROS] Subscribed to topic: {sub.Topic} ({sub.RosType})");
+        SafeLog($"[ROS] Subscribed to topic: {sub.Topic}");
+    }
+
+    private void SendUnsubscribe(string topic)
+    {
+        if (ws == null || string.IsNullOrWhiteSpace(topic)) return;
+
+        var payload = new
+        {
+            op = "unsubscribe",
+            topic = topic
+        };
+
+        string json = JsonConvert.SerializeObject(payload);
+        ws.Send(json);
+
+        Debug.Log($"[ROS] Unsubscribed from topic: {topic}");
+        SafeLog($"[ROS] Unsubscribed from topic: {topic}");
+    }
+
+    // ======================== MAIN THREAD DISPATCH ========================
+
+    private void RunOnMainThread(Action action)
+    {
+        if (action == null || isDestroyedOrQuitting) return;
+        mainThreadActions.Enqueue(action);
+    }
+
+    private void FlushMainThreadActions()
+    {
+        while (mainThreadActions.TryDequeue(out var action))
+        {
             try
             {
-                ok = ImageConversion.LoadImage(texture, toApply, markNonReadable: true);
+                action?.Invoke();
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[ROS] LoadImage exception: {ex.Message}");
-                LogText.SetText($"[ROS] LoadImage exception: {ex.Message}");
-                ok = false;
+                Debug.LogError($"[ROS] MainThread action exception: {ex}");
             }
+        }
+    }
 
-            if (ok && !currentConnectionState)
-                SetState(true);
-            else if (!ok && currentConnectionState)
+    private void SafeLog(string message)
+    {
+        if (isDestroyedOrQuitting) return;
+
+        RunOnMainThread(() =>
+        {
+            try
+            {
+                if (isDestroyedOrQuitting) return;
+                if (!this) return;
+                if (!LogText) return;
+
+                LogText.SetText(message);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[ROS] SafeLog exception: {ex.Message}");
+            }
+        });
+    }
+
+    private void ScheduleReconnectFromAnyThread()
+    {
+        if (!autoReconnect || !wantConnection || isStopping || isDestroyedOrQuitting)
+            return;
+
+        RunOnMainThread(() =>
+        {
+            if (!this || isDestroyedOrQuitting) return;
+            if (!autoReconnect || !wantConnection || isStopping || isConnected || isConnecting) return;
+            if (reconnectCoroutineScheduled) return;
+
+            reconnectCoroutineScheduled = true;
+            StartCoroutine(ReconnectAfterDelay(reconnectDelaySec));
+        });
+    }
+
+    private void SetDisconnectedStateFromAnyThread()
+    {
+        RunOnMainThread(() =>
+        {
+            if (!this || isDestroyedOrQuitting) return;
+            if (!isStopping)
                 SetState(false);
-
-            if (!ok)
-            {
-                latestDecoded = null;
-                return;
-            }
-
-            latestDecoded = null;
-
-            if (Time.unscaledTime - lastStatTime > 2f)
-            {
-                Debug.Log($"[ROS] recv={receivedFrames} drop={droppedFrames} tex={texture.width}x{texture.height}");
-                receivedFrames = droppedFrames = 0;
-                lastStatTime = Time.unscaledTime;
-            }
-
-            if (autoReconnect && wantConnection && !isConnected && !isConnecting && !isStopping)
-            {
-                StartCoroutine(ReconnectAfterDelay(reconnectDelaySec));
-            }
-        }
-        catch (Exception ex)
-        {
-            Debug.LogError($"[ROS] Update exception: {ex}");
-            LogText.SetText($"[ROS] Update exception: {ex}");
-        }
+        });
     }
 
-    // ======================== INTERNALS ========================
-
-    private void EnsureDecoderThread()
-    {
-        try
-        {
-            if (decodeThread != null && decodeThread.IsAlive)
-                return;
-
-            running = true;
-            decodeThread = new Thread(DecoderLoop) { IsBackground = true, Name = "ROS JPEG Decoder" };
-            decodeThread.Start();
-        }
-        catch (Exception ex)
-        {
-            Debug.LogError($"[ROS] EnsureDecoderThread exception: {ex}");
-            LogText.SetText($"[ROS] EnsureDecoderThread exception: {ex}");
-        }
-    }
-
-    private void DecoderLoop()
-    {
-        try
-        {
-            while (running)
-            {
-                try
-                {
-                    if (!frameQueue.TryDequeue(out var encoded))
-                    {
-                        Thread.Sleep(1);
-                        continue;
-                    }
-
-                    latestDecoded = encoded;
-                }
-                catch (ThreadInterruptedException)
-                {
-                    break;
-                }
-                catch (Exception ex)
-                {
-                    Debug.LogWarning($"[ROS] DecoderLoop iteration exception: {ex.Message}");
-                    LogText.SetText($"[ROS] DecoderLoop iteration exception: {ex.Message}");
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            Debug.LogError($"[ROS] DecoderLoop fatal exception: {ex}");
-            LogText.SetText($"[ROS] DecoderLoop fatal exception: {ex}");
-        }
-    }
+    // ======================== CONNECTION ========================
 
     private void SafeConnect()
     {
-        if (isConnecting || isConnected || !wantConnection) return;
+        if (isConnecting || isConnected || !wantConnection || isDestroyedOrQuitting) return;
 
         try
         {
@@ -330,12 +451,13 @@ public class RosbridgeImageSubscriber : MonoBehaviour
                 {
                     UnsubscribeWsHandlers(ws);
                     ws.CloseAsync();
+                    ws = null;
                 }
             }
-            catch (Exception ex) 
+            catch (Exception ex)
             {
                 Debug.LogWarning($"[ROS] Pre-close previous ws exception: {ex.Message}");
-                LogText.SetText($"[ROS] Pre-close previous ws exception: {ex.Message}");
+                SafeLog($"[ROS] Pre-close previous ws exception: {ex.Message}");
             }
 
             ws = new WebSocket(wsUrl)
@@ -358,52 +480,57 @@ public class RosbridgeImageSubscriber : MonoBehaviour
         {
             isConnecting = false;
             Debug.LogError($"[ROS] SafeConnect exception: {ex}");
-            LogText.SetText($"[ROS] SafeConnect exception: {ex}");
-            if (autoReconnect && wantConnection)
-                StartCoroutine(ReconnectAfterDelay(reconnectDelaySec));
+            SafeLog($"[ROS] SafeConnect exception: {ex.Message}");
+            ScheduleReconnectFromAnyThread();
         }
     }
 
     private IEnumerator ConnectWithTimeout(float timeoutSec)
     {
-        bool timedOut = false;
+        bool connectOk = true;
         float start = Time.unscaledTime;
 
-        // Connection attempt ? extracted from try/catch with yield
-        bool connectOk = true;
         try
         {
-            ws.ConnectAsync();
+            ws?.ConnectAsync();
         }
         catch (Exception ex)
         {
             isConnecting = false;
             connectOk = false;
             Debug.LogError($"[ROS] ConnectAsync threw: {ex}");
-            LogText.SetText($"[ROS] ConnectAsync threw: {ex}");
+            SafeLog($"[ROS] ConnectAsync threw: {ex.Message}");
         }
 
         if (!connectOk)
         {
-            if (autoReconnect && wantConnection)
+            reconnectCoroutineScheduled = false;
+            if (autoReconnect && wantConnection && !isDestroyedOrQuitting)
+            {
+                reconnectCoroutineScheduled = true;
                 yield return ReconnectAfterDelay(reconnectDelaySec);
+            }
             yield break;
         }
 
-        while (isConnecting && !isConnected)
+        while (isConnecting && !isConnected && !isDestroyedOrQuitting)
         {
             if (Time.unscaledTime - start > timeoutSec)
-            {
-                timedOut = true;
                 break;
-            }
+
             yield return null;
         }
 
-        if (timedOut && ws != null)
+        if (isDestroyedOrQuitting)
+        {
+            reconnectCoroutineScheduled = false;
+            yield break;
+        }
+
+        if (isConnecting && !isConnected && ws != null)
         {
             Debug.LogWarning("[ROS] Connection timeout; closing and scheduling reconnect.");
-            LogText.SetText("[ROS] Connection timeout; closing and scheduling reconnect.");
+            SafeLog("[ROS] Connection timeout; closing and scheduling reconnect.");
 
             try
             {
@@ -412,26 +539,50 @@ public class RosbridgeImageSubscriber : MonoBehaviour
             catch (Exception ex)
             {
                 Debug.LogWarning($"[ROS] Close after timeout exception: {ex.Message}");
-                LogText.SetText($"[ROS] Close after timeout exception: {ex.Message}");
+                SafeLog($"[ROS] Close after timeout exception: {ex.Message}");
             }
 
             isConnecting = false;
             isConnected = false;
 
+            reconnectCoroutineScheduled = false;
+
             if (autoReconnect && wantConnection)
+            {
+                reconnectCoroutineScheduled = true;
                 yield return ReconnectAfterDelay(reconnectDelaySec);
+            }
+        }
+        else
+        {
+            reconnectCoroutineScheduled = false;
         }
     }
 
     private IEnumerator ReconnectAfterDelay(float delay)
     {
-        if (isConnecting || isConnected || !wantConnection) yield break;
+        if (isDestroyedOrQuitting)
+        {
+            reconnectCoroutineScheduled = false;
+            yield break;
+        }
+
+        if (isConnecting || isConnected || !wantConnection)
+        {
+            reconnectCoroutineScheduled = false;
+            yield break;
+        }
 
         Debug.Log($"[ROS] Reconnecting in {delay:0.##} s...");
-        LogText.SetText($"[ROS] Reconnecting in {delay:0.##} s...");
+        SafeLog($"[ROS] Reconnecting in {delay:0.##} s...");
+
         yield return new WaitForSecondsRealtime(Mathf.Max(0.05f, delay));
 
-        if (!wantConnection) yield break;
+        reconnectCoroutineScheduled = false;
+
+        if (isDestroyedOrQuitting || !wantConnection || isConnecting || isConnected)
+            yield break;
+
         SafeConnect();
     }
 
@@ -459,22 +610,32 @@ public class RosbridgeImageSubscriber : MonoBehaviour
         {
             isConnected = true;
             isConnecting = false;
-            Debug.Log("[ROS] WebSocket opened");
-            var sub = new
-            {
-                op = "subscribe",
-                topic = imageTopic,
-                type = "sensor_msgs/CompressedImage",
-                throttle_rate = Mathf.Max(0, subscribeThrottleMs)
-            };
 
-            string payload = JsonConvert.SerializeObject(sub);
-            ws?.Send(payload);
+            Debug.Log("[ROS] WebSocket opened");
+            SafeLog("[ROS] WebSocket opened");
+
+            foreach (var pair in subscriptions)
+            {
+                var sub = pair.Value;
+                SendSubscribe(sub);
+            }
+
+            RunOnMainThread(() =>
+            {
+                if (!this || isDestroyedOrQuitting) return;
+
+                hasReceivedAnyImageFrame = false;
+                waitingForFirstImage = true;
+                imageResubscribeAttempts = 0;
+                lastImageMessageTime = Time.unscaledTime;
+
+                RestartImageWatchdogs();
+            });
         }
         catch (Exception ex)
         {
             Debug.LogError($"[ROS] OnOpen exception: {ex}");
-            LogText.SetText($"[ROS] OnOpen exception: {ex}");
+            SafeLog($"[ROS] OnOpen exception: {ex.Message}");
         }
     }
 
@@ -485,11 +646,11 @@ public class RosbridgeImageSubscriber : MonoBehaviour
             if (!e.IsText)
             {
                 Debug.LogWarning("[ROS] Non-text message received; ignoring.");
-                LogText.SetText("[ROS] Non-text message received; ignoring.");
+                SafeLog("[ROS] Non-text message received; ignoring.");
                 return;
             }
 
-            JObject jo = null;
+            JObject jo;
             try
             {
                 jo = JsonConvert.DeserializeObject<JObject>(e.Data);
@@ -497,45 +658,36 @@ public class RosbridgeImageSubscriber : MonoBehaviour
             catch (Exception ex)
             {
                 Debug.LogWarning($"[ROS] JSON parse error: {ex.Message}");
-                LogText.SetText($"[ROS] JSON parse error: {ex.Message}");
+                SafeLog($"[ROS] JSON parse error: {ex.Message}");
                 return;
             }
 
-            var msg = jo?["msg"];
-            if (msg == null) return;
+            if (jo == null)
+                return;
 
-            var dataToken = msg["data"];
-            if (dataToken == null) return;
+            string topic = jo["topic"]?.Value<string>();
+            var msg = jo["msg"];
 
-            string b64 = dataToken.Value<string>();
-            if (string.IsNullOrEmpty(b64)) return;
+            if (msg == null || string.IsNullOrWhiteSpace(topic))
+                return;
 
-            byte[] jpegBytes = null;
+            if (!subscriptions.TryGetValue(topic, out var subscription))
+                return;
+
             try
             {
-                jpegBytes = Convert.FromBase64String(b64);
+                subscription.Handler?.Invoke(msg);
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[ROS] Base64 decode error: {ex.Message}");
-                LogText.SetText($"[ROS] Base64 decode error: {ex.Message}");
-                return;
+                Debug.LogWarning($"[ROS] Handler exception for topic '{topic}': {ex.Message}");
+                SafeLog($"[ROS] Handler exception for topic '{topic}': {ex.Message}");
             }
-
-            receivedFrames++;
-
-            if (maxQueueFrames > 0)
-            {
-                while (frameQueue.Count >= maxQueueFrames && frameQueue.TryDequeue(out _))
-                    droppedFrames++;
-            }
-
-            frameQueue.Enqueue(jpegBytes);
         }
         catch (Exception ex)
         {
             Debug.LogError($"[ROS] OnMessage exception: {ex}");
-            LogText.SetText($"[ROS] OnMessage exception: {ex}");
+            SafeLog($"[ROS] OnMessage exception: {ex.Message}");
         }
     }
 
@@ -544,20 +696,18 @@ public class RosbridgeImageSubscriber : MonoBehaviour
         try
         {
             Debug.LogWarning($"[ROS] WS Error: {e.Message}");
-            LogText.SetText($"[ROS] WS Error: {e.Message}");
+            SafeLog($"[ROS] WS Error: {e.Message}");
+
             isConnected = false;
             isConnecting = false;
 
-            if (!isStopping)
-                SetState(false);
-
-            if (autoReconnect && wantConnection && !isStopping)
-                StartCoroutine(ReconnectAfterDelay(reconnectDelaySec));
+            SetDisconnectedStateFromAnyThread();
+            ScheduleReconnectFromAnyThread();
         }
         catch (Exception ex)
         {
             Debug.LogError($"[ROS] OnError exception: {ex}");
-            LogText.SetText($"[ROS] OnError exception: {ex}");
+            SafeLog($"[ROS] OnError exception: {ex.Message}");
         }
     }
 
@@ -566,29 +716,283 @@ public class RosbridgeImageSubscriber : MonoBehaviour
         try
         {
             Debug.LogWarning($"[ROS] WS Closed: code={e.Code}, reason={e.Reason}, clean={e.WasClean}");
-            LogText.SetText($"[ROS] WS Closed: code={e.Code}, reason={e.Reason}, clean={e.WasClean}");
+            SafeLog($"[ROS] WS Closed: code={e.Code}, reason={e.Reason}, clean={e.WasClean}");
+
             isConnected = false;
             isConnecting = false;
 
-            if (!isStopping)
-                SetState(false);
-
-            if (autoReconnect && wantConnection && !isStopping)
-                StartCoroutine(ReconnectAfterDelay(reconnectDelaySec));
+            SetDisconnectedStateFromAnyThread();
+            ScheduleReconnectFromAnyThread();
         }
         catch (Exception ex)
         {
             Debug.LogError($"[ROS] OnClose exception: {ex}");
-            LogText.SetText($"[ROS] OnClose exception: {ex}");
+            SafeLog($"[ROS] OnClose exception: {ex.Message}");
+        }
+    }
+
+    // ======================== MESSAGE HANDLERS ========================
+
+    private void HandleImageMessage(JToken msg)
+    {
+        var dataToken = msg["data"];
+        if (dataToken == null) return;
+
+        string b64 = dataToken.Value<string>();
+        if (string.IsNullOrEmpty(b64)) return;
+
+        byte[] jpegBytes;
+        try
+        {
+            jpegBytes = Convert.FromBase64String(b64);
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning($"[ROS] Base64 decode error: {ex.Message}");
+            SafeLog($"[ROS] Base64 decode error: {ex.Message}");
+            return;
+        }
+
+        Interlocked.Increment(ref receivedFrames);
+
+        lock (latestFrameLock)
+        {
+            if (latestEncodedFrame != null)
+                Interlocked.Increment(ref replacedFrames);
+
+            latestEncodedFrame = jpegBytes;
+        }
+    }
+
+    private void HandleBatteryMessage(JToken msg)
+    {
+        var dataToken = msg["data"];
+        if (dataToken == null) return;
+
+        try
+        {
+            ushort value = dataToken.Value<ushort>();
+            latestBatteryValue = value;
+            hasBatteryValue = true;
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning($"[ROS] Battery parse error: {ex.Message}");
+            SafeLog($"[ROS] Battery parse error: {ex.Message}");
+        }
+    }
+
+    private void HandleTaskMessage(JToken msg)
+    {
+        var dataToken = msg["data"];
+        if (dataToken == null) return;
+
+        string taskText;
+        try
+        {
+            taskText = dataToken.Value<string>();
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning($"[ROS] Task parse error: {ex.Message}");
+            SafeLog($"[ROS] Task parse error: {ex.Message}");
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(taskText))
+            return;
+
+        RunOnMainThread(() =>
+        {
+            try
+            {
+                if (isDestroyedOrQuitting) return;
+                if (!this) return;
+
+                if (taskManager == null)
+                {
+                    Debug.LogWarning("[ROS] TaskManager is not assigned.");
+                    SafeLog("[ROS] TaskManager is not assigned.");
+                    return;
+                }
+                SafeLog($"[ROS] New task received: {taskText}");
+                taskManager.AddNewTask(taskText);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[ROS] TaskManager.AddNewTask exception: {ex.Message}");
+                SafeLog($"[ROS] TaskManager.AddNewTask exception: {ex.Message}");
+            }
+        });
+    }
+
+    // ======================== UPDATE STEPS ========================
+
+    private void UpdateBatteryUi()
+    {
+        if (hasBatteryValue && batteryText)
+        {
+            float batteryVolt = latestBatteryValue / 1000f;
+            batteryText.text = $"{batteryVolt:F2}V";
+            if (batteryVolt >= 12f)
+            {
+                batteryText.color = new Color(0, 104f / 255f, 0);
+                batteryIcon.color = new Color(0, 104f / 255f, 0);
+            }
+            else if (batteryVolt >= 11f)
+            {
+                batteryText.color = Color.yellow;
+                batteryIcon.color = Color.yellow;
+            }
+            else
+            {
+                batteryText.color = Color.red;
+                batteryIcon.color = Color.red;
+            }
+        }
+    }
+
+    private void UpdatePing()
+    {
+        if (pingIntervalSec <= 0f || !isConnected || ws == null)
+            return;
+
+        if (Time.unscaledTime - lastPingTime <= pingIntervalSec)
+            return;
+
+        try
+        {
+            ws.Ping();
+            lastPingTime = Time.unscaledTime;
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning($"[ROS] Ping exception: {ex.Message}");
+            SafeLog($"[ROS] Ping exception: {ex.Message}");
+        }
+    }
+
+    private void ApplyLatestFrameIfNeeded()
+    {
+        if (maxApplyFps > 0f)
+        {
+            float interval = 1f / Mathf.Max(1f, maxApplyFps);
+            if (Time.unscaledTime - lastFrameApplyTime < interval)
+                return;
+        }
+
+        byte[] frameToApply = null;
+
+        lock (latestFrameLock)
+        {
+            if (latestEncodedFrame != null)
+            {
+                frameToApply = latestEncodedFrame;
+                latestEncodedFrame = null;
+            }
+        }
+
+        if (frameToApply == null || frameToApply.Length == 0)
+            return;
+
+        if (texture == null)
+        {
+            try
+            {
+                texture = new Texture2D(2, 2, TextureFormat.RGB24, false, false)
+                {
+                    wrapMode = TextureWrapMode.Clamp,
+                    filterMode = FilterMode.Bilinear
+                };
+                AssignTextureToTarget(texture);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[ROS] Texture init failed: {ex.Message}");
+                SafeLog($"[ROS] Texture init failed: {ex.Message}");
+                return;
+            }
+        }
+
+        bool ok = false;
+        try
+        {
+            ok = ImageConversion.LoadImage(texture, frameToApply, markNonReadable: true);
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning($"[ROS] LoadImage exception: {ex.Message}");
+            SafeLog($"[ROS] LoadImage exception: {ex.Message}");
+        }
+
+        lastFrameApplyTime = Time.unscaledTime;
+
+        if (ok)
+        {
+            hasReceivedAnyImageFrame = true;
+            waitingForFirstImage = false;
+            imageResubscribeAttempts = 0;
+            lastImageMessageTime = Time.unscaledTime;
+        }
+
+        if (ok && !currentConnectionState)
+            SetState(true);
+        else if (!ok && currentConnectionState)
+            SetState(false);
+
+        if (!ok)
+            Interlocked.Increment(ref droppedFrames);
+    }
+
+    private void PrintStatsIfNeeded()
+    {
+        if (Time.unscaledTime - lastStatTime <= 2f)
+            return;
+
+        int recv = Interlocked.Exchange(ref receivedFrames, 0);
+        int drop = Interlocked.Exchange(ref droppedFrames, 0);
+        int repl = Interlocked.Exchange(ref replacedFrames, 0);
+
+        if (texture != null)
+        {
+            Debug.Log(
+                $"[ROS] recv={recv} replaced={repl} drop={drop} tex={texture.width}x{texture.height} " +
+                $"battery={(hasBatteryValue ? latestBatteryValue.ToString() : "n/a")}");
+        }
+        else if (recv > 0 || drop > 0 || repl > 0)
+        {
+            Debug.Log(
+                $"[ROS] recv={recv} replaced={repl} drop={drop} " +
+                $"battery={(hasBatteryValue ? latestBatteryValue.ToString() : "n/a")}");
+        }
+
+        lastStatTime = Time.unscaledTime;
+    }
+
+    private void ScheduleReconnectIfNeeded()
+    {
+        if (autoReconnect && wantConnection && !isConnected && !isConnecting && !isStopping && !reconnectCoroutineScheduled)
+        {
+            reconnectCoroutineScheduled = true;
+            StartCoroutine(ReconnectAfterDelay(reconnectDelaySec));
         }
     }
 
     // ======================== HELPERS ========================
 
+    private void ClearLatestFrame()
+    {
+        lock (latestFrameLock)
+        {
+            latestEncodedFrame = null;
+        }
+    }
+
     private void ValidateWsUrl()
     {
         if (string.IsNullOrWhiteSpace(wsUrl))
             throw new ArgumentException("wsUrl is empty.");
+
         if (!wsUrl.StartsWith("ws://") && !wsUrl.StartsWith("wss://"))
             throw new ArgumentException($"wsUrl must start with ws:// or wss://, got: {wsUrl}");
 
@@ -596,15 +1000,10 @@ public class RosbridgeImageSubscriber : MonoBehaviour
         {
             var uri = new Uri(wsUrl);
             if (uri.Port <= 0 || uri.Port > 65535)
-            {
-                LogText.SetText($"Invalid port in wsUrl: {uri.Port}");
                 throw new ArgumentException($"Invalid port in wsUrl: {uri.Port}");
-            }
-
         }
         catch (UriFormatException ex)
         {
-            LogText.SetText($"Invalid wsUrl format: {wsUrl}. {ex.Message}");
             throw new ArgumentException($"Invalid wsUrl format: {wsUrl}. {ex.Message}");
         }
     }
@@ -613,7 +1012,9 @@ public class RosbridgeImageSubscriber : MonoBehaviour
     {
         try
         {
-            if (targetUI != null) targetUI.texture = tex;
+            if (targetUI != null)
+                targetUI.texture = tex;
+
             if (targetRenderer != null)
             {
                 var mr = targetRenderer.material;
@@ -623,7 +1024,7 @@ public class RosbridgeImageSubscriber : MonoBehaviour
         }
         catch (Exception ex)
         {
-            LogText.SetText($"[ROS] AssignTextureToTarget exception: {ex.Message}");
+            SafeLog($"[ROS] AssignTextureToTarget exception: {ex.Message}");
             Debug.LogWarning($"[ROS] AssignTextureToTarget exception: {ex.Message}");
         }
     }
@@ -638,12 +1039,13 @@ public class RosbridgeImageSubscriber : MonoBehaviour
                     Destroy(texture);
                 else
                     DestroyImmediate(texture);
+
                 texture = null;
             }
         }
         catch (Exception ex)
         {
-            LogText.SetText($"[ROS] SafeDestroyTexture exception: {ex.Message}");
+            SafeLog($"[ROS] SafeDestroyTexture exception: {ex.Message}");
             Debug.LogWarning($"[ROS] SafeDestroyTexture exception: {ex.Message}");
         }
     }
@@ -655,16 +1057,156 @@ public class RosbridgeImageSubscriber : MonoBehaviour
             currentConnectionState = state;
 
             if (targetUI) targetUI.enabled = state;
-
-            if (EnableController) EnableController.SetActive(state);
+            if (ShowDashboard) ShowDashboard.SetActive(state);
+            if (CameraPanelSettings) CameraPanelSettings.SetActive(state);
+            if (DashboardPanelSettings) DashboardPanelSettings.SetActive(state);
             if (DisconnectButton) DisconnectButton.SetActive(state);
-            if (PanelSettings) PanelSettings.SetActive(state);
-            if (DisableController) DisableController.SetActive(state);
+            //if (PanelSettings) PanelSettings.SetActive(state);
         }
         catch (Exception ex)
         {
-            LogText.SetText($"[ROS] SetState exception: {ex.Message}");
+            SafeLog($"[ROS] SetState exception: {ex.Message}");
             Debug.LogWarning($"[ROS] SetState exception: {ex.Message}");
+        }
+    }
+
+    private void RestartImageWatchdogs()
+    {
+        StopImageWatchdogs();
+
+        if (firstImageTimeoutSec > 0f)
+            imageStartupWatchdogCoroutine = StartCoroutine(ImageStartupWatchdog());
+
+        if (imageSilenceTimeoutSec > 0f)
+            imageSilenceWatchdogCoroutine = StartCoroutine(ImageSilenceWatchdog());
+    }
+
+    private void StopImageWatchdogs()
+    {
+        if (imageStartupWatchdogCoroutine != null)
+        {
+            StopCoroutine(imageStartupWatchdogCoroutine);
+            imageStartupWatchdogCoroutine = null;
+        }
+
+        if (imageSilenceWatchdogCoroutine != null)
+        {
+            StopCoroutine(imageSilenceWatchdogCoroutine);
+            imageSilenceWatchdogCoroutine = null;
+        }
+    }
+
+    private IEnumerator ImageStartupWatchdog()
+    {
+        float startTime = Time.unscaledTime;
+
+        SafeLog($"[ROS] Waiting for first image from topic: {imageTopic}");
+
+        while (!isDestroyedOrQuitting && isConnected && waitingForFirstImage)
+        {
+            if (Time.unscaledTime - startTime >= firstImageTimeoutSec)
+            {
+                Debug.LogWarning($"[ROS] No image frames received from topic '{imageTopic}' within {firstImageTimeoutSec:0.##} sec.");
+                SafeLog($"[ROS] No image frames from '{imageTopic}' within {firstImageTimeoutSec:0.##} sec. Camera may be disabled.");
+
+                waitingForFirstImage = false;
+
+                if (autoRecoverImageStream)
+                    TryRecoverImageStream();
+
+                yield break;
+            }
+
+            yield return null;
+        }
+    }
+
+    private IEnumerator ImageSilenceWatchdog()
+    {
+        while (!isDestroyedOrQuitting)
+        {
+            if (!isConnected)
+            {
+                yield return null;
+                continue;
+            }
+
+            if (hasReceivedAnyImageFrame)
+            {
+                float silence = Time.unscaledTime - lastImageMessageTime;
+                if (silence >= imageSilenceTimeoutSec)
+                {
+                    Debug.LogWarning($"[ROS] Image stream stalled for {silence:0.##} sec on topic '{imageTopic}'.");
+                    SafeLog($"[ROS] Image stream stalled on '{imageTopic}' for {silence:0.##} sec.");
+
+                    hasReceivedAnyImageFrame = false;
+                    waitingForFirstImage = true;
+
+                    if (autoRecoverImageStream)
+                        TryRecoverImageStream();
+
+                    yield break;
+                }
+            }
+
+            yield return null;
+        }
+    }
+
+    private void TryRecoverImageStream()
+    {
+        if (!autoRecoverImageStream || !isConnected || ws == null)
+            return;
+
+        if (!subscriptions.TryGetValue(imageTopic, out var imageSub))
+        {
+            SafeLog($"[ROS] Cannot recover image stream: topic '{imageTopic}' is not registered.");
+            return;
+        }
+
+        if (imageResubscribeAttempts < maxImageResubscribeAttempts)
+        {
+            imageResubscribeAttempts++;
+
+            SafeLog($"[ROS] Recovering image stream: resubscribe attempt {imageResubscribeAttempts}/{maxImageResubscribeAttempts}");
+
+            try
+            {
+                SendUnsubscribe(imageTopic);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[ROS] Unsubscribe image topic exception: {ex.Message}");
+                SafeLog($"[ROS] Unsubscribe image topic exception: {ex.Message}");
+            }
+
+            try
+            {
+                SendSubscribe(imageSub);
+                waitingForFirstImage = true;
+                hasReceivedAnyImageFrame = false;
+                lastImageMessageTime = Time.unscaledTime;
+
+                RestartImageWatchdogs();
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[ROS] Resubscribe image topic exception: {ex.Message}");
+                SafeLog($"[ROS] Resubscribe image topic exception: {ex.Message}");
+            }
+        }
+        else
+        {
+            SafeLog("[ROS] Image topic recovery failed. Reconnecting WebSocket...");
+            Debug.LogWarning("[ROS] Image topic recovery failed. Reconnecting WebSocket...");
+
+            StopConnection();
+
+            if (!isDestroyedOrQuitting)
+            {
+                wantConnection = true;
+                SafeConnect();
+            }
         }
     }
 }

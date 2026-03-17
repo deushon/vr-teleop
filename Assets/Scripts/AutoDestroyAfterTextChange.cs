@@ -17,11 +17,14 @@ public class AutoDestroyTMPText : MonoBehaviour
 
     public void SetText(string newText)
     {
-        if (tmpText == null)
+        if (!this) return;
+
+        if (!tmpText)
             tmpText = GetComponent<TMP_Text>();
 
+        if (!tmpText) return;
+
         tmpText.text += "\n" + newText;
-        //RestartTimer();
     }
 
     private void RestartTimer()
