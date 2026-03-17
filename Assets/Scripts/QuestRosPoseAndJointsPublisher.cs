@@ -251,7 +251,7 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
                     op = "advertise",
                     topic = recordSessionTopic,
                     type = "std_msgs/String",
-                    latch = false
+                    latch = true
                 }));
             }
         };
@@ -780,6 +780,7 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
 
         isRecording = true;
 
+        Debug.Log($"[ROS TX] About to publish START record event, id={currentRecordId}, wsState={ws?.ReadyState}");
         PublishRecordSessionEvent("start", currentRecordId);
         Debug.Log($"[ROS TX] Recording started, id={currentRecordId}");
     }
@@ -796,6 +797,7 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
         currentRecording.rosTimeWasSynchronizedAtEnd = rosTimeSynchronized;
         currentRecording.ntpTimeWasSynchronizedAtEnd = ntpTimeSynchronized;
 
+        Debug.Log($"[ROS TX] About to publish STOP record event, id={currentRecordId}, wsState={ws?.ReadyState}");
         PublishRecordSessionEvent("stop", currentRecordId);
 
         var completed = currentRecording;
@@ -1046,5 +1048,6 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
         };
 
         ws.Send(envelope.ToString(Formatting.None));
+        //Debug.Log("SUCCESSFUL SENDING");
     }
 }

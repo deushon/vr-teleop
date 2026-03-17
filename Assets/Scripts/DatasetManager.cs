@@ -19,7 +19,7 @@ public class DatasetManager : MonoBehaviour
     [SerializeField] private TaskManager taskManager;
 
     [SerializeField] private TMP_Text IpText;
-    [SerializeField] private int datasetServerPort = 9191;
+    [SerializeField] private TMP_Text PortText;
     [SerializeField] private string uploadDatasetPath = "/upload_dataset";
 
     [SerializeField] private AutoDestroyTMPText LogText;
@@ -134,7 +134,7 @@ public class DatasetManager : MonoBehaviour
             yield break;
         }
 
-        string url = $"http://{IpText.text}:{datasetServerPort}{uploadDatasetPath}";
+        string url = $"http://{IpText.text}:{PortText.text}{uploadDatasetPath}";
 
         var payload = new DatasetUploadRequest
         {

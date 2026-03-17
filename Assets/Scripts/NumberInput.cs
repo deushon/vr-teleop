@@ -9,6 +9,9 @@ public class NumberInput : MonoBehaviour
     private GameObject[] objectsToHide;
 
     [SerializeField]
+    private GameObject[] objectsToShow;
+
+    [SerializeField]
     private GameObject numbersInput;
 
     private TMP_Text inputText;
@@ -109,6 +112,10 @@ public class NumberInput : MonoBehaviour
         foreach (var obj in objectsToHide)
         {
             obj.SetActive(!state);
+        }
+        foreach (var obj in objectsToShow)
+        {
+            obj.SetActive(state);
         }
         numbersInput.SetActive(state);
     }
