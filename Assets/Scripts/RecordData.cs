@@ -42,4 +42,9 @@ public class RecordData : MonoBehaviour
     {
         return TextField != null ? TextField.text : string.Empty;
     }
+
+    public string GetRecordId()
+    {
+        return recordedSession != null ? recordedSession.recordId : string.Empty;
+    }
 }

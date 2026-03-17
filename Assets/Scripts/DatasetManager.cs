@@ -151,6 +151,7 @@ public class DatasetManager : MonoBehaviour
 
             payload.records.Add(new DatasetUploadRecord
             {
+                recordId = recordData.GetRecordId(),
                 label = recordData.GetLabel(),
                 taskName = recordData.GetSelectedTaskName(),
                 data = recordData.GetRecordedSession()

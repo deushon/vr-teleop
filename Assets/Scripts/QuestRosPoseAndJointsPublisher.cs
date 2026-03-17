@@ -8,6 +8,9 @@ using TMPro;
 using UnityEngine;
 using UnityEngine.XR;
 using WebSocketSharp;
+using System.Net;
+using System.Net.Sockets;
+using System.Threading.Tasks;
 
 public class QuestRosPoseAndJointsPublisher : MonoBehaviour
 {
@@ -28,6 +31,10 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
     [Header("Dataset Recording")]
     [SerializeField] private DatasetManager datasetManager;
 
+    [Header("Record Session Events")]
+    public string recordSessionTopic = "/record_sessions";
+    public bool sendRecordSessionEvents = true;
+
     [Header("XR")]
     public Camera xrCamera;
 
@@ -46,6 +53,37 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
     [Tooltip("If true, hand/controller orientation is sent relative to head rotation. If false, absolute orientation is sent.")]
     public bool orientationRelativeToHead = true;
 
+    [Header("External Time Sync (NTP)")]
+    public bool enableNtpTimeSync = true;
+    public bool debugNtpTimeSync = true;
+    public int ntpTimeoutMs = 3000;
+
+    [Tooltip("NTP servers are queried in order until one responds.")]
+    public string[] ntpServers = new[]
+{
+        "ru.pool.ntp.org",
+        "0.ru.pool.ntp.org",
+        "1.ru.pool.ntp.org",
+        "2.ru.pool.ntp.org",
+        "3.ru.pool.ntp.org",
+
+        "europe.pool.ntp.org",
+        "0.europe.pool.ntp.org",
+        "1.europe.pool.ntp.org",
+        "2.europe.pool.ntp.org",
+        "3.europe.pool.ntp.org",
+
+        "pool.ntp.org",
+        "0.pool.ntp.org",
+        "1.pool.ntp.org",
+        "2.pool.ntp.org",
+        "3.pool.ntp.org",
+
+        "time.cloudflare.com",
+
+
+        "time.google.com"
+    };
     private Coroutine sendLoopCoroutine;
 
     private WebSocket ws;
@@ -85,10 +123,23 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
     private bool isRecording;
     private RecordedSession currentRecording;
 
+    private string currentRecordId;
+    private string sessionInstanceId;
+
+    private bool ntpTimeSynchronized;
+    private double ntpClockOffsetSec;   // ntp_utc - local_utc
+    private double ntpLastRttSec;
+    private Coroutine ntpSyncCoroutine;
+
     void Awake()
     {
         if (!xrCamera) xrCamera = Camera.main;
         wait = new WaitForSeconds(1f / Mathf.Max(1f, sendHz));
+
+        sessionInstanceId = Guid.NewGuid().ToString("N");
+
+        if (enableNtpTimeSync)
+            ntpSyncCoroutine = StartCoroutine(InitializeNtpTime());
     }
 
     public void InitConnection()
@@ -131,6 +182,7 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
             {
                 ws.Send(JsonConvert.SerializeObject(new { op = "unadvertise", topic = poseArrayTopic }));
                 ws.Send(JsonConvert.SerializeObject(new { op = "unadvertise", topic = jointStateTopic }));
+                ws.Send(JsonConvert.SerializeObject(new { op = "unadvertise", topic = recordSessionTopic }));
             }
         }
         catch { }
@@ -189,6 +241,17 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
                     op = "subscribe",
                     topic = timeSyncResponseTopic,
                     type = "std_msgs/String"
+                }));
+            }
+
+            if (sendRecordSessionEvents)
+            {
+                ws.Send(JsonConvert.SerializeObject(new
+                {
+                    op = "advertise",
+                    topic = recordSessionTopic,
+                    type = "std_msgs/String",
+                    latch = false
                 }));
             }
         };
@@ -396,7 +459,13 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
                 localUnixTimeNs = GetUnixTimeNs(),
                 localMonotonicSec = Time.realtimeSinceStartupAsDouble,
 
+                estimatedExternalUnixTimeNs = GetEstimatedExternalUnixTimeNs(),
                 estimatedRosUnixTimeNs = GetEstimatedRosUnixTimeNs(),
+
+                ntpTimeSynchronized = ntpTimeSynchronized,
+                ntpClockOffsetSec = ntpClockOffsetSec,
+                ntpSyncRttSec = ntpLastRttSec,
+
                 rosClockOffsetSec = rosClockOffsetSec,
                 syncRttSec = lastSyncRttSec,
                 rosTimeSynchronized = rosTimeSynchronized,
@@ -586,19 +655,21 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
 
     long GetEstimatedRosUnixTimeNs()
     {
-        long localNs = GetUnixTimeNs();
-        if (!rosTimeSynchronized)
-            return localNs;
+        long baseNs = GetEstimatedExternalUnixTimeNs();
 
-        return localNs + (long)(rosClockOffsetSec * 1_000_000_000.0);
+        if (!rosTimeSynchronized)
+            return baseNs;
+
+        return baseNs + (long)(rosClockOffsetSec * 1_000_000_000.0);
     }
+
     void SendTimeSyncPing()
     {
         if (!enableRosTimeSync || ws == null || ws.ReadyState != WebSocketState.Open)
             return;
 
         lastTimeSyncId = Guid.NewGuid().ToString("N");
-        lastTimeSyncLocalSendNs = GetUnixTimeNs();
+        lastTimeSyncLocalSendNs = GetEstimatedExternalUnixTimeNs();
 
         var payload = new JObject
         {
@@ -640,7 +711,7 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
             if (clientSendNs == 0L || robotRosUnixNs == 0L)
                 return;
 
-            long clientRecvNs = GetUnixTimeNs();
+            long clientRecvNs = GetEstimatedExternalUnixTimeNs();
             long midpointNs = clientSendNs + (clientRecvNs - clientSendNs) / 2L;
 
             double measuredOffsetSec = (robotRosUnixNs - midpointNs) / 1_000_000_000.0;
@@ -685,17 +756,32 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
 
     public void StartRecording()
     {
+        currentRecordId = Guid.NewGuid().ToString("N");
+
         currentRecording = new RecordedSession
         {
+            recordId = currentRecordId,
+
             startedLocalUnixTimeNs = GetUnixTimeNs(),
+            endedLocalUnixTimeNs = 0L,
+
             startedEstimatedRosUnixTimeNs = GetEstimatedRosUnixTimeNs(),
+            endedEstimatedRosUnixTimeNs = 0L,
+
+            startedEstimatedExternalUnixTimeNs = GetEstimatedExternalUnixTimeNs(),
+            endedEstimatedExternalUnixTimeNs = 0L,
+
             rosTimeWasSynchronizedAtStart = rosTimeSynchronized,
+            ntpTimeWasSynchronizedAtStart = ntpTimeSynchronized,
+
             sourceWsUrl = wsUrl,
             sourceSendHz = sendHz
         };
 
         isRecording = true;
-        Debug.Log("[ROS TX] Recording started");
+
+        PublishRecordSessionEvent("start", currentRecordId);
+        Debug.Log($"[ROS TX] Recording started, id={currentRecordId}");
     }
 
     public void StopRecordingAndSave()
@@ -705,7 +791,12 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
 
         currentRecording.endedLocalUnixTimeNs = GetUnixTimeNs();
         currentRecording.endedEstimatedRosUnixTimeNs = GetEstimatedRosUnixTimeNs();
+        currentRecording.endedEstimatedExternalUnixTimeNs = GetEstimatedExternalUnixTimeNs();
+
         currentRecording.rosTimeWasSynchronizedAtEnd = rosTimeSynchronized;
+        currentRecording.ntpTimeWasSynchronizedAtEnd = ntpTimeSynchronized;
+
+        PublishRecordSessionEvent("stop", currentRecordId);
 
         var completed = currentRecording;
 
@@ -721,7 +812,8 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
             Debug.LogWarning("[ROS TX] DatasetManager is not assigned, recorded session is lost.");
         }
 
-        Debug.Log("[ROS TX] Recording stopped");
+        Debug.Log($"[ROS TX] Recording stopped, id={currentRecordId}");
+        currentRecordId = null;
     }
 
     private RecordedPose PoseFromToken(JToken poseToken)
@@ -789,5 +881,170 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
             z = q.z,
             w = q.w
         };
+    }
+
+    IEnumerator InitializeNtpTime()
+    {
+        yield return null;
+
+        bool success = false;
+
+        foreach (var server in ntpServers)
+        {
+            if (string.IsNullOrWhiteSpace(server))
+                continue;
+
+            bool done = false;
+            bool ok = false;
+            DateTime ntpUtc = default;
+            double rttSec = 0.0;
+            string error = null;
+
+            Task.Run(() =>
+            {
+                try
+                {
+                    ok = TryGetNetworkTime(server, ntpTimeoutMs, out ntpUtc, out rttSec, out error);
+                }
+                catch (Exception ex)
+                {
+                    ok = false;
+                    error = ex.Message;
+                }
+                finally
+                {
+                    done = true;
+                }
+            });
+
+            while (!done)
+                yield return null;
+
+            if (!ok)
+            {
+                if (debugNtpTimeSync)
+                    Debug.LogWarning($"[NTP] Failed for {server}: {error}");
+                continue;
+            }
+
+            DateTime localUtc = DateTime.UtcNow;
+            ntpClockOffsetSec = (ntpUtc - localUtc).TotalSeconds;
+            ntpLastRttSec = rttSec;
+            ntpTimeSynchronized = true;
+            success = true;
+
+            if (debugNtpTimeSync)
+            {
+                Debug.Log($"[NTP] Sync OK via {server}: offset={ntpClockOffsetSec:F6}s rtt={ntpLastRttSec:F4}s utc={ntpUtc:O}");
+            }
+
+            break;
+        }
+
+        if (!success)
+        {
+            ntpTimeSynchronized = false;
+            ntpClockOffsetSec = 0.0;
+            ntpLastRttSec = 0.0;
+
+            Debug.LogWarning("[NTP] All NTP servers failed. Falling back to local device UTC.");
+        }
+    }
+
+    bool TryGetNetworkTime(string hostname, int timeoutMs, out DateTime networkUtc, out double rttSec, out string error)
+    {
+        networkUtc = default;
+        rttSec = 0.0;
+        error = null;
+
+        const int ntpPort = 123;
+        byte[] ntpData = new byte[48];
+        ntpData[0] = 0x1B; // LI, Version, Mode
+
+        IPAddress[] addresses = Dns.GetHostAddresses(hostname);
+        if (addresses == null || addresses.Length == 0)
+        {
+            error = "DNS resolved no addresses";
+            return false;
+        }
+
+        var endpoint = new IPEndPoint(addresses[0], ntpPort);
+
+        using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+        socket.ReceiveTimeout = timeoutMs;
+        socket.SendTimeout = timeoutMs;
+
+        DateTime sendUtc = DateTime.UtcNow;
+        long sendTicks = sendUtc.Ticks;
+
+        socket.Connect(endpoint);
+        socket.Send(ntpData);
+
+        int received = socket.Receive(ntpData);
+        DateTime recvUtc = DateTime.UtcNow;
+        long recvTicks = recvUtc.Ticks;
+
+        if (received < 48)
+        {
+            error = $"Short NTP response: {received} bytes";
+            return false;
+        }
+
+        ulong intPart = ((ulong)ntpData[40] << 24) | ((ulong)ntpData[41] << 16) | ((ulong)ntpData[42] << 8) | ntpData[43];
+        ulong fractPart = ((ulong)ntpData[44] << 24) | ((ulong)ntpData[45] << 16) | ((ulong)ntpData[46] << 8) | ntpData[47];
+
+        const ulong seventyYears = 2208988800UL;
+        ulong unixSeconds = intPart - seventyYears;
+        double fraction = fractPart / 4294967296.0;
+
+        DateTime serverUtc = DateTime.UnixEpoch.AddSeconds(unixSeconds + fraction);
+
+        rttSec = TimeSpan.FromTicks(recvTicks - sendTicks).TotalSeconds;
+
+        // приближение: считаем, что ответ соответствует середине RTT
+        networkUtc = serverUtc.AddSeconds(rttSec * 0.5);
+        return true;
+    }
+
+    long GetEstimatedExternalUnixTimeNs()
+    {
+        long localNs = GetUnixTimeNs();
+
+        if (ntpTimeSynchronized)
+            return localNs + (long)(ntpClockOffsetSec * 1_000_000_000.0);
+
+        return localNs;
+    }
+
+    void PublishRecordSessionEvent(string eventType, string recordId)
+    {
+        if (!sendRecordSessionEvents || ws == null || ws.ReadyState != WebSocketState.Open)
+            return;
+
+        var msg = new JObject
+        {
+            ["record_id"] = recordId,
+            ["event_type"] = eventType, // "start" / "stop"
+            ["app_session_id"] = sessionInstanceId,
+            ["timestamp_unix_ns"] = GetEstimatedExternalUnixTimeNs(),
+            ["timestamp_ros_unix_ns"] = GetEstimatedRosUnixTimeNs(),
+            ["ntp_time_synchronized"] = ntpTimeSynchronized,
+            ["ros_time_synchronized"] = rosTimeSynchronized,
+            ["pose_topic"] = poseArrayTopic,
+            ["joint_topic"] = jointStateTopic,
+            ["send_hz"] = sendHz
+        };
+
+        var envelope = new JObject
+        {
+            ["op"] = "publish",
+            ["topic"] = recordSessionTopic,
+            ["msg"] = new JObject
+            {
+                ["data"] = msg.ToString(Formatting.None)
+            }
+        };
+
+        ws.Send(envelope.ToString(Formatting.None));
     }
 }

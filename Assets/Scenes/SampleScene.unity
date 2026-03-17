@@ -74578,12 +74578,35 @@ MonoBehaviour:
   timeSyncIntervalSec: 5
   debugTimeSync: 0
   datasetManager: {fileID: 1584691900}
+  recordSessionTopic: /record_sessions
+  sendRecordSessionEvents: 1
   xrCamera: {fileID: 1109407790274764220}
   sendHz: 10
   debugPrint: 1
   handsGraceSeconds: 0.25
   positionRelativeToHeadButIgnoreHeadRotation: 1
   orientationRelativeToHead: 0
+  enableNtpTimeSync: 1
+  debugNtpTimeSync: 0
+  ntpTimeoutMs: 3000
+  ntpServers:
+  - ru.pool.ntp.org
+  - 0.ru.pool.ntp.org
+  - 1.ru.pool.ntp.org
+  - 2.ru.pool.ntp.org
+  - 3.ru.pool.ntp.org
+  - europe.pool.ntp.org
+  - 0.europe.pool.ntp.org
+  - 1.europe.pool.ntp.org
+  - 2.europe.pool.ntp.org
+  - 3.europe.pool.ntp.org
+  - pool.ntp.org
+  - 0.pool.ntp.org
+  - 1.pool.ntp.org
+  - 2.pool.ntp.org
+  - 3.pool.ntp.org
+  - time.cloudflare.com
+  - time.google.com
   IpText: {fileID: 2021360255}
   PortText: {fileID: 2021360254}
 --- !u!1 &1373642805

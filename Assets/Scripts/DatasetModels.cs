@@ -50,6 +50,11 @@ public class RecordedFrame
     public RecordedPose right;
 
     public List<RecordedJointValue> joints = new();
+
+    public long estimatedExternalUnixTimeNs;
+    public bool ntpTimeSynchronized;
+    public double ntpClockOffsetSec;
+    public double ntpSyncRttSec;
 }
 
 [Serializable]
@@ -68,6 +73,12 @@ public class RecordedSession
     public float sourceSendHz;
 
     public List<RecordedFrame> frames = new();
+
+    public string recordId;
+    public long startedEstimatedExternalUnixTimeNs;
+    public long endedEstimatedExternalUnixTimeNs;
+    public bool ntpTimeWasSynchronizedAtStart;
+    public bool ntpTimeWasSynchronizedAtEnd;
 }
 
 [Serializable]
@@ -76,6 +87,7 @@ public class DatasetUploadRecord
     public string label;
     public string taskName;
     public RecordedSession data;
+    public string recordId;
 }
 
 [Serializable]
