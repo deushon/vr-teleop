@@ -140,7 +140,7 @@ To adapt this application for different robots:
 **Robot not responding to movements**:
 - Ensure calibration was performed correctly
 - Check ROS topics are being published
-- Verify [teleop_fetch](../teleop_fetch-AngelsContr) node is running
+- Verify [teleop_fetch](https://github.com/homebrewroboticsclub/br-vr) node is running
 
 **Connection fails**:
 - Ping robot from a device on the same network
