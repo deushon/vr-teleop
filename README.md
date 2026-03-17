@@ -1,6 +1,6 @@
 # Robot MR Control - VR Teleoperation Application
 
-> **Related Project**: This VR application works with the [teleop_fetch ROS package](../teleop_fetch-AngelsContr) which provides robot-side implementation for teleoperation.
+> **Related Project**: This VR application works with the [teleop_fetch ROS package](https://github.com/homebrewroboticsclub/br-vr) which provides robot-side implementation for teleoperation.
 
 ## Overview
 
@@ -20,7 +20,7 @@ Unity-based Mixed Reality application for Meta Quest VR headsets that enables in
 - **Hardware**: Meta Quest 2/3/Pro VR headset
 - **Software**: Unity (Mixed Reality)
 - **Network**: Same local network as the robot
-- **Robot Requirements**: Robot must have the [teleop_fetch package](../teleop_fetch) installed and running
+- **Robot Requirements**: Robot must have the [teleop_fetch package](https://github.com/homebrewroboticsclub/br-vr) installed and running
 
 ## Dependencies
 
@@ -35,7 +35,7 @@ Unity-based Mixed Reality application for Meta Quest VR headsets that enables in
 ### Prerequisites
 
 1. Ensure the robot is powered on and connected to the network
-2. Verify the [teleop_fetch ROS package](../teleop_fetch) is running on the robot
+2. Verify the [teleop_fetch ROS package](https://github.com/homebrewroboticsclub/br-vr) is running on the robot
 3. Both VR headset and robot must be on the same network
 
 ### Usage Instructions
@@ -168,7 +168,7 @@ When connected to a robot that integrates with [Task-router-x402](https://github
 
 ## Related Projects
 
-- **[teleop_fetch ROS Package](../teleop_fetch-AngelsContr)** - Robot-side ROS implementation for Brewie robot
+- **[teleop_fetch ROS Package](https://github.com/homebrewroboticsclub/br-vr)** - Robot-side ROS implementation for Brewie robot
 - **[Task-router-x402](https://github.com/homebrewroboticsclub/Task-router-x402)** - Orchestration service for robots and agents with x402 payment integration
 
 
