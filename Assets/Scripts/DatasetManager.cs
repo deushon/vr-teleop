@@ -130,11 +130,39 @@ public class DatasetManager : MonoBehaviour
     {
         if (IpText == null || string.IsNullOrWhiteSpace(IpText.text))
         {
-            Debug.LogError("Robot IP is empty");
+            Debug.LogError("[Dataset] Robot IP is empty");
             yield break;
         }
 
-        string url = $"http://{IpText.text}:{PortText.text}{uploadDatasetPath}";
+        if (PortText == null || string.IsNullOrWhiteSpace(PortText.text))
+        {
+            Debug.LogError("[Dataset] Robot port is empty");
+            yield break;
+        }
+
+        if (taskManager == null || taskManager.GetActiveTaskData() == null)
+        {
+            Debug.LogError("[Dataset] Active task is missing");
+            yield break;
+        }
+
+        if (!TeleopAuthSession.IsAuthorized || string.IsNullOrWhiteSpace(TeleopAuthSession.AccessToken))
+        {
+            Debug.LogError("[Dataset] Access token is missing. Login first.");
+            yield break;
+        }
+
+        var robotId = taskManager.GetActiveTaskData().RobotId;
+        if (string.IsNullOrWhiteSpace(robotId))
+        {
+            Debug.LogError("[Dataset] RobotId is empty");
+            yield break;
+        }
+
+        string ip = IpText.text.Trim();
+        string port = PortText.text.Trim();
+
+        string url = $"http://{ip}:{port}/api/teleop/robots/{robotId}/dataset/upload_dataset";
 
         var payload = new DatasetUploadRequest
         {
@@ -144,10 +172,12 @@ public class DatasetManager : MonoBehaviour
 
         foreach (var recordObj in currentRecords)
         {
-            if (recordObj == null) continue;
+            if (recordObj == null)
+                continue;
 
             var recordData = recordObj.GetComponent<RecordData>();
-            if (recordData == null) continue;
+            if (recordData == null)
+                continue;
 
             payload.records.Add(new DatasetUploadRecord
             {
@@ -159,30 +189,33 @@ public class DatasetManager : MonoBehaviour
         }
 
         string json = JsonConvert.SerializeObject(payload, Formatting.Indented);
-
-        //File.WriteAllText("test.json", json);
         byte[] body = Encoding.UTF8.GetBytes(json);
 
         using var request = new UnityWebRequest(url, UnityWebRequest.kHttpVerbPOST);
         request.uploadHandler = new UploadHandlerRaw(body);
         request.downloadHandler = new DownloadHandlerBuffer();
+
+        request.SetRequestHeader("accept", "*/*");
+        request.SetRequestHeader("Authorization", $"Bearer {TeleopAuthSession.AccessToken}");
         request.SetRequestHeader("Content-Type", "application/json");
 
-        LogText.SetText($"[Dataset] Uploading {payload.records.Count} records to {url}");
-        Debug.Log($"[Dataset] Uploading {payload.records.Count} records to {url}");
+        string startMessage = $"[Dataset] Uploading {payload.records.Count} records to {url}";
+        if (LogText != null) LogText.SetText(startMessage);
+        Debug.Log(startMessage);
 
         yield return request.SendWebRequest();
 
         if (request.result == UnityWebRequest.Result.Success)
         {
-            var message = $"[Dataset] Upload success: {request.downloadHandler.text}";
-            LogText.SetText(message);
+            string message = $"[Dataset] Upload success: {request.downloadHandler.text}";
+            if (LogText != null) LogText.SetText(message);
             Debug.Log(message);
         }
         else
         {
-            var message = $"[Dataset] Upload failed: {request.result}, {request.error}\nResponse: {request.downloadHandler.text}";
-            LogText.SetText(message);
+            string responseText = request.downloadHandler != null ? request.downloadHandler.text : "";
+            string message = $"[Dataset] Upload failed: {request.result}, {request.error}\nResponse: {responseText}";
+            if (LogText != null) LogText.SetText(message);
             Debug.LogError(message);
         }
     }

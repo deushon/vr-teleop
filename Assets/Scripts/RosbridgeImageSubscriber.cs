@@ -9,6 +9,7 @@ using WebSocketSharp;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using TMPro;
+using System.Threading.Tasks;
 
 public class RosbridgeImageSubscriber : MonoBehaviour
 {
@@ -50,13 +51,16 @@ public class RosbridgeImageSubscriber : MonoBehaviour
     public bool enableRttMonitor = true;
 
     [Tooltip("How often to measure rosbridge RTT.")]
-    public float rttMeasureIntervalSec = 1.0f;
+    public float rttMeasureIntervalSec = 0.5f;
 
     [Tooltip("Threshold used for UI state and control precheck.")]
     public int rttBlockThresholdMs = 200;
 
     [Tooltip("Artificial RTT offset for testing.")]
     public int debugArtificialRttOffsetMs = 0;
+
+    private volatile bool rttProbeInFlight;
+    private volatile int lastRttProbeToken;
 
     [SerializeField] private TMP_Text pingText;
 
@@ -78,8 +82,9 @@ public class RosbridgeImageSubscriber : MonoBehaviour
     [SerializeField] private GameObject RecordPanel;
     [SerializeField] private GameObject TaskPanel;
     [SerializeField] private SoftHeadFollower DashboardHeadFollower;
+    [SerializeField] private GameObject LogoutButton;
     //[SerializeField] private GameObject DashboardPanelSettings;
-    //[SerializeField] private GameObject DisconnectButton;
+    //[SerializeField] private GameObject DisableControlButton;
     //[SerializeField] private GameObject PanelSettings;
 
     [SerializeField] private TMP_Text IpText;
@@ -93,6 +98,8 @@ public class RosbridgeImageSubscriber : MonoBehaviour
 
     private readonly ConcurrentQueue<Action> mainThreadActions = new();
     private readonly Dictionary<string, TopicSubscription> subscriptions = new();
+
+    private readonly Dictionary<string, List<Action<JToken>>> externalTopicHandlers = new();
 
     private volatile bool isConnecting;
     private volatile bool isConnected;
@@ -744,17 +751,38 @@ public class RosbridgeImageSubscriber : MonoBehaviour
             if (msg == null || string.IsNullOrWhiteSpace(topic))
                 return;
 
-            if (!subscriptions.TryGetValue(topic, out var subscription))
-                return;
-
-            try
+            if (subscriptions.TryGetValue(topic, out var subscription))
             {
-                subscription.Handler?.Invoke(msg);
+                try
+                {
+                    subscription.Handler?.Invoke(msg);
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogWarning($"[ROS] Handler exception for topic '{topic}': {ex.Message}");
+                    SafeLog($"[ROS] Handler exception for topic '{topic}': {ex.Message}");
+                }
             }
-            catch (Exception ex)
+
+            if (externalTopicHandlers.TryGetValue(topic, out var handlers))
             {
-                Debug.LogWarning($"[ROS] Handler exception for topic '{topic}': {ex.Message}");
-                SafeLog($"[ROS] Handler exception for topic '{topic}': {ex.Message}");
+                var handlersCopy = new List<Action<JToken>>(handlers);
+                var msgCopy = msg?.DeepClone();
+
+                RunOnMainThread(() =>
+                {
+                    for (int i = 0; i < handlersCopy.Count; i++)
+                    {
+                        try
+                        {
+                            handlersCopy[i]?.Invoke(msgCopy);
+                        }
+                        catch (Exception ex)
+                        {
+                            Debug.LogWarning($"[ROS] External handler exception for topic '{topic}': {ex.Message}");
+                        }
+                    }
+                });
             }
         }
         catch (Exception ex)
@@ -1135,8 +1163,9 @@ public class RosbridgeImageSubscriber : MonoBehaviour
             if (RecordPanel) RecordPanel.SetActive(state);
             if (TaskPanel) TaskPanel.SetActive(!state);
             if (DashboardHeadFollower) DashboardHeadFollower.verticalOffset = state ? -0.83f : 0;
+            if (LogoutButton) LogoutButton.SetActive(!state);
             //if (DashboardPanelSettings) DashboardPanelSettings.SetActive(state);
-            //if (DisconnectButton) DisconnectButton.SetActive(state);
+            //if (DisableControlButton) DisableControlButton.SetActive(state);
             //if (PanelSettings) PanelSettings.SetActive(state);
         }
         catch (Exception ex)
@@ -1286,34 +1315,131 @@ public class RosbridgeImageSubscriber : MonoBehaviour
         }
     }
 
-    private bool TryMeasureCurrentRttMs(out int rttMs)
+    //private bool TryMeasureCurrentRttMs(out int rttMs)
+    //{
+    //    rttMs = -1;
+
+    //    if (ws == null || ws.ReadyState != WebSocketState.Open)
+    //        return false;
+
+    //    try
+    //    {
+    //        var sw = System.Diagnostics.Stopwatch.StartNew();
+    //        bool ok = ws.Ping();
+    //        sw.Stop();
+
+    //        if (!ok)
+    //            return false;
+
+    //        int measuredMs = Mathf.RoundToInt((float)sw.Elapsed.TotalMilliseconds);
+    //        measuredMs += Mathf.Max(0, debugArtificialRttOffsetMs);
+
+    //        rttMs = measuredMs;
+    //        return true;
+    //    }
+    //    catch (Exception ex)
+    //    {
+    //        Debug.LogWarning($"[ROS] RTT measure failed: {ex.Message}");
+    //        return false;
+    //    }
+    //}
+
+    private void BeginAsyncRttProbe()
     {
-        rttMs = -1;
+        if (rttProbeInFlight)
+            return;
 
         if (ws == null || ws.ReadyState != WebSocketState.Open)
-            return false;
+            return;
 
-        try
+        rttProbeInFlight = true;
+        int probeToken = ++lastRttProbeToken;
+        var socketRef = ws;
+
+        Task.Run(() =>
         {
-            var sw = System.Diagnostics.Stopwatch.StartNew();
-            bool ok = ws.Ping();
-            sw.Stop();
+            int measuredRtt = -1;
+            bool ok = false;
 
-            if (!ok)
-                return false;
+            try
+            {
+                if (socketRef != null && socketRef.ReadyState == WebSocketState.Open)
+                {
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+                    ok = socketRef.Ping();
+                    sw.Stop();
 
-            int measuredMs = Mathf.RoundToInt((float)sw.Elapsed.TotalMilliseconds);
-            measuredMs += Mathf.Max(0, debugArtificialRttOffsetMs);
+                    if (ok)
+                    {
+                        measuredRtt = Mathf.RoundToInt((float)sw.Elapsed.TotalMilliseconds);
+                        measuredRtt += Mathf.Max(0, debugArtificialRttOffsetMs);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[ROS] Async RTT measure failed: {ex.Message}");
+                ok = false;
+            }
 
-            rttMs = measuredMs;
-            return true;
-        }
-        catch (Exception ex)
-        {
-            Debug.LogWarning($"[ROS] RTT measure failed: {ex.Message}");
-            return false;
-        }
+            RunOnMainThread(() =>
+            {
+                // игнорируем устаревший результат
+                if (probeToken != lastRttProbeToken)
+                {
+                    rttProbeInFlight = false;
+                    return;
+                }
+
+                if (ok && measuredRtt >= 0)
+                {
+                    lastMeasuredRttMs = measuredRtt;
+                    hasValidRttSample = true;
+                    rttAboveThreshold = measuredRtt >= rttBlockThresholdMs;
+                    lastRttMeasureTime = Time.unscaledTime;
+                }
+                else
+                {
+                    hasValidRttSample = false;
+                    rttAboveThreshold = false;
+                    lastMeasuredRttMs = -1;
+                }
+
+                rttProbeInFlight = false;
+                UpdatePingUi();
+            });
+        });
     }
+
+    //private IEnumerator RttMonitorLoop()
+    //{
+    //    while (!isDestroyedOrQuitting)
+    //    {
+    //        if (!enableRttMonitor || !isConnected || ws == null || ws.ReadyState != WebSocketState.Open)
+    //        {
+    //            yield return null;
+    //            continue;
+    //        }
+
+    //        if (TryMeasureCurrentRttMs(out int rttMs))
+    //        {
+    //            lastMeasuredRttMs = rttMs;
+    //            hasValidRttSample = true;
+    //            rttAboveThreshold = rttMs >= rttBlockThresholdMs;
+    //            lastRttMeasureTime = Time.unscaledTime;
+    //        }
+    //        else
+    //        {
+    //            hasValidRttSample = false;
+    //            rttAboveThreshold = false;
+    //            lastMeasuredRttMs = -1;
+    //        }
+
+    //        UpdatePingUi();
+
+    //        yield return new WaitForSecondsRealtime(Mathf.Max(0.1f, rttMeasureIntervalSec));
+    //    }
+    //}
 
     private IEnumerator RttMonitorLoop()
     {
@@ -1325,21 +1451,10 @@ public class RosbridgeImageSubscriber : MonoBehaviour
                 continue;
             }
 
-            if (TryMeasureCurrentRttMs(out int rttMs))
+            if (!rttProbeInFlight)
             {
-                lastMeasuredRttMs = rttMs;
-                hasValidRttSample = true;
-                rttAboveThreshold = rttMs >= rttBlockThresholdMs;
-                lastRttMeasureTime = Time.unscaledTime;
+                BeginAsyncRttProbe();
             }
-            else
-            {
-                hasValidRttSample = false;
-                rttAboveThreshold = false;
-                lastMeasuredRttMs = -1;
-            }
-
-            UpdatePingUi();
 
             yield return new WaitForSecondsRealtime(Mathf.Max(0.1f, rttMeasureIntervalSec));
         }
@@ -1379,5 +1494,88 @@ public class RosbridgeImageSubscriber : MonoBehaviour
                 }
             }
         });
+    }
+    public void RegisterExternalTopicHandler(string topic, Action<JToken> handler, string rosType = "std_msgs/String")
+    {
+        if (string.IsNullOrWhiteSpace(topic) || handler == null)
+            return;
+
+        if (!externalTopicHandlers.TryGetValue(topic, out var handlers))
+        {
+            handlers = new List<Action<JToken>>();
+            externalTopicHandlers[topic] = handlers;
+        }
+
+        if (!handlers.Contains(handler))
+            handlers.Add(handler);
+
+        // topic нужен в subscriptions только как описание подписки
+        if (!subscriptions.ContainsKey(topic))
+        {
+            RegisterSubscription(topic, rosType, _ => { });
+        }
+
+        if (ws != null && ws.ReadyState == WebSocketState.Open && subscriptions.TryGetValue(topic, out var sub))
+        {
+            SendSubscribe(sub);
+        }
+    }
+
+    public void UnregisterExternalTopicHandler(string topic, Action<JToken> handler)
+    {
+        if (string.IsNullOrWhiteSpace(topic) || handler == null)
+            return;
+
+        if (!externalTopicHandlers.TryGetValue(topic, out var handlers))
+            return;
+
+        handlers.Remove(handler);
+
+        if (handlers.Count == 0)
+        {
+            externalTopicHandlers.Remove(topic);
+
+            if (subscriptions.ContainsKey(topic))
+            {
+                try
+                {
+                    SendUnsubscribe(topic);
+                }
+                catch { }
+
+                subscriptions.Remove(topic);
+            }
+        }
+    }
+
+    public bool TryPublish(string topic, JObject msg)
+    {
+        if (ws == null || ws.ReadyState != WebSocketState.Open)
+            return false;
+
+        try
+        {
+            var envelope = new JObject
+            {
+                ["op"] = "publish",
+                ["topic"] = topic,
+                ["msg"] = msg
+            };
+
+            ws.Send(envelope.ToString(Formatting.None));
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning($"[ROS] TryPublish failed for topic '{topic}': {ex.Message}");
+            return false;
+        }
+    }
+
+    public bool IsSocketOpen => ws != null && ws.ReadyState == WebSocketState.Open;
+
+    public bool TryMeasureSharedSocketRttMs(out int rttMs)
+    {
+        return TryGetCurrentRttMs(out rttMs);
     }
 }
