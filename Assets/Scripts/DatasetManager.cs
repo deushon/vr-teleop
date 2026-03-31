@@ -20,24 +20,15 @@ public class DatasetManager : MonoBehaviour
 
     [SerializeField] private TMP_Text IpText;
     [SerializeField] private TMP_Text PortText;
-    [SerializeField] private TMP_Text RestApiPortText;
-    [SerializeField] private string uploadDatasetPath = "/upload_dataset";
 
     [SerializeField] private AutoDestroyTMPText LogText;
 
     private List<GameObject> currentRecords = new List<GameObject>();
 
-    //private IEnumerator Start()
-    //{
-    //    yield return new WaitForSeconds(1f);
-    //    AddNewRecord();
-    //    yield return null;
-    //    AddNewRecord();
-    //    yield return null;
-    //    AddNewRecord();
-    //    yield return null;
-    //    AddNewRecord();
-    //}
+    private long acceptedAtUnixTimeNs;
+    private string acceptedAtUtcIso;
+    private bool hasAcceptedAt;
+    private readonly List<TeleopControlEvent> teleopControlEvents = new();
 
     public void AddNewRecord()
     {
@@ -131,27 +122,58 @@ public class DatasetManager : MonoBehaviour
     {
         if (IpText == null || string.IsNullOrWhiteSpace(IpText.text))
         {
-            Debug.LogError("Robot IP is empty");
+            Debug.LogError("[Dataset] Robot IP is empty");
             yield break;
         }
 
-        string restPort = (RestApiPortText != null && !string.IsNullOrWhiteSpace(RestApiPortText.text))
-            ? RestApiPortText.text
-            : "9191";
-        string url = $"http://{IpText.text}:{restPort}{uploadDatasetPath}";
+        if (PortText == null || string.IsNullOrWhiteSpace(PortText.text))
+        {
+            Debug.LogError("[Dataset] Robot port is empty");
+            yield break;
+        }
+
+        if (taskManager == null || taskManager.GetActiveTaskData() == null)
+        {
+            Debug.LogError("[Dataset] Active task is missing");
+            yield break;
+        }
+
+        if (!TeleopAuthSession.IsAuthorized || string.IsNullOrWhiteSpace(TeleopAuthSession.AccessToken))
+        {
+            Debug.LogError("[Dataset] Access token is missing. Login first.");
+            yield break;
+        }
+
+        var robotId = taskManager.GetActiveTaskData().RobotId;
+        if (string.IsNullOrWhiteSpace(robotId))
+        {
+            Debug.LogError("[Dataset] RobotId is empty");
+            yield break;
+        }
+
+        string ip = IpText.text.Trim();
+        string port = PortText.text.Trim();
+
+        string url = $"http://{ip}:{port}/api/teleop/robots/{robotId}/dataset/upload_dataset";
 
         var payload = new DatasetUploadRequest
         {
             source = "unity_quest_dataset",
-            generatedUtcIso = System.DateTime.UtcNow.ToString("o")
+            generatedUtcIso = System.DateTime.UtcNow.ToString("o"),
+            acceptedAtUtcIso = hasAcceptedAt ? acceptedAtUtcIso : null,
+            teleopControl = new TeleopControlEventsBlock(),
         };
+
+        payload.teleopControl.events.AddRange(teleopControlEvents);
 
         foreach (var recordObj in currentRecords)
         {
-            if (recordObj == null) continue;
+            if (recordObj == null)
+                continue;
 
             var recordData = recordObj.GetComponent<RecordData>();
-            if (recordData == null) continue;
+            if (recordData == null)
+                continue;
 
             payload.records.Add(new DatasetUploadRecord
             {
@@ -163,31 +185,66 @@ public class DatasetManager : MonoBehaviour
         }
 
         string json = JsonConvert.SerializeObject(payload, Formatting.Indented);
-
-        //File.WriteAllText("test.json", json);
         byte[] body = Encoding.UTF8.GetBytes(json);
 
         using var request = new UnityWebRequest(url, UnityWebRequest.kHttpVerbPOST);
         request.uploadHandler = new UploadHandlerRaw(body);
         request.downloadHandler = new DownloadHandlerBuffer();
+
+        request.SetRequestHeader("accept", "*/*");
+        request.SetRequestHeader("Authorization", $"Bearer {TeleopAuthSession.AccessToken}");
         request.SetRequestHeader("Content-Type", "application/json");
 
-        LogText.SetText($"[Dataset] Uploading {payload.records.Count} records to {url}");
-        Debug.Log($"[Dataset] Uploading {payload.records.Count} records to {url}");
+        string startMessage = $"[Dataset] Uploading {payload.records.Count} records to {url}";
+        if (LogText != null) LogText.SetText(startMessage);
+        Debug.Log(startMessage);
 
         yield return request.SendWebRequest();
 
         if (request.result == UnityWebRequest.Result.Success)
         {
-            var message = $"[Dataset] Upload success: {request.downloadHandler.text}";
-            LogText.SetText(message);
+            string message = $"[Dataset] Upload success: {request.downloadHandler.text}";
+            if (LogText != null) LogText.SetText(message);
             Debug.Log(message);
+
+            teleopControlEvents.Clear();
+            hasAcceptedAt = false;
+            acceptedAtUnixTimeNs = 0L;
+            acceptedAtUtcIso = null;
         }
         else
         {
-            var message = $"[Dataset] Upload failed: {request.result}, {request.error}\nResponse: {request.downloadHandler.text}";
-            LogText.SetText(message);
+            string responseText = request.downloadHandler != null ? request.downloadHandler.text : "";
+            string message = $"[Dataset] Upload failed: {request.result}, {request.error}\nResponse: {responseText}";
+            if (LogText != null) LogText.SetText(message);
             Debug.LogError(message);
         }
+    }
+
+    public void MarkAcceptedInWork()
+    {
+        acceptedAtUtcIso = System.DateTime.UtcNow.ToString("o");
+        hasAcceptedAt = true;
+
+        Debug.Log($"[Dataset] Accepted in work at {acceptedAtUtcIso} ({acceptedAtUnixTimeNs})");
+
+        if (LogText != null)
+            LogText.SetText($"[Dataset] Accepted in work: {acceptedAtUtcIso}");
+    }
+
+    public void RegisterControlEvent(bool hasControl)
+    {
+        var evt = new TeleopControlEvent
+        {
+            eventType = hasControl ? "get_control" : "lost_control",
+            timestampUtcIso = System.DateTime.UtcNow.ToString("o")
+        };
+
+        teleopControlEvents.Add(evt);
+
+        Debug.Log($"[Dataset] Control event registered: {evt.eventType} at {evt.timestampUtcIso}");
+
+        if (LogText != null)
+            LogText.SetText($"[Dataset] Control event: {evt.eventType}");
     }
 }

@@ -43,7 +43,14 @@ public class NumberInput : MonoBehaviour
             if ((inputLimit > 0 && inputText.text.Length < inputLimit) || inputLimit == 0)
             {
                 textFields.inputedValue += symbol;
-                inputText.text = textFields.inputedValue;
+                if (textFields.isPassword)
+                {
+                    inputText.text = new string('*', textFields.inputedValue.Length);
+                }
+                else
+                {
+                    inputText.text = textFields.inputedValue;
+                }
             }
         }
         else
@@ -51,7 +58,14 @@ public class NumberInput : MonoBehaviour
             if (textFields.inputedValue.Length > 0)
             {
                 textFields.inputedValue = textFields.inputedValue[..^1];
-                inputText.text = textFields.inputedValue;
+                if (textFields.isPassword)
+                {
+                    inputText.text = new string('*', textFields.inputedValue.Length);
+                }
+                else
+                {
+                    inputText.text = textFields.inputedValue;
+                }
             }
             if (textFields.inputedValue == string.Empty)
             {

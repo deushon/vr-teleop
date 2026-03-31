@@ -13,9 +13,18 @@ public class IPData
 }
 
 [System.Serializable]
+
+public class AuthData
+{
+    public string username; 
+    public string password;
+}
+
+[System.Serializable]
 public class DataForSave
 {
     public IPData ipData;
+    public AuthData authData;
 }
 
 public class SaveData : MonoBehaviour
@@ -27,6 +36,10 @@ public class SaveData : MonoBehaviour
     private DefaultTextValue PortText;
     [SerializeField]
     private DefaultTextValue RestApiPortText;
+    [SerializeField]
+    private DefaultTextValue UsernameText;
+    [SerializeField]
+    private DefaultTextValue PasswordText;
 
     private void Awake()
     {
@@ -43,9 +56,15 @@ public class SaveData : MonoBehaviour
             port = PortText.inputedValue, 
             restApiPort = RestApiPortText.inputedValue
         };
+        AuthData authData = new()
+        {
+            username = UsernameText.inputedValue,
+            password = PasswordText.inputedValue
+        };
         DataForSave data = new()
         {
-            ipData = ipData
+            ipData = ipData,
+            authData = authData
         };
 
         string json = JsonUtility.ToJson(data);
@@ -59,7 +78,7 @@ public class SaveData : MonoBehaviour
         DataForSave loadedData =
             JsonUtility.FromJson<DataForSave>(File.ReadAllText(jsonPath));
 
-        if (loadedData == null || loadedData.ipData == null)
+        if (loadedData == null || loadedData.ipData == null || loadedData.authData == null)
             return;
 
         if (!string.IsNullOrEmpty(loadedData.ipData.ip))
@@ -84,6 +103,24 @@ public class SaveData : MonoBehaviour
             var portRestTMP = RestApiPortText.GetComponent<TMP_Text>();
             portRestTMP.text = RestApiPortText.inputedValue;
             portRestTMP.color = Color.white;
+        }
+
+        //TODO: Fix Save of auth data and change color method
+
+        if (!string.IsNullOrEmpty(loadedData.authData.username))
+        {
+            UsernameText.inputedValue = loadedData.authData.username;
+            var usernameTMP = UsernameText.GetComponent<TMP_Text>();
+            usernameTMP.text = UsernameText.inputedValue;
+            usernameTMP.color = new Color(48f / 255f, 48f / 255f, 48f / 255f);
+        }
+
+        if (!string.IsNullOrEmpty(loadedData.authData.password))
+        {
+            PasswordText.inputedValue = loadedData.authData.password;
+            var passwordTMP = PasswordText.GetComponent<TMP_Text>();
+            passwordTMP.text = new string('*', PasswordText.inputedValue.Length);
+            passwordTMP.color = new Color(48f / 255f, 48f / 255f, 48f / 255f);
         }
     }
 }

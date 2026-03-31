@@ -30,7 +30,7 @@ RectTransform:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 595126871591789142}
   m_LocalRotation: {x: -0, y: 0.000000029802315, z: -0.000000029802315, w: 1}
-  m_LocalPosition: {x: 0, y: 0, z: -0}
+  m_LocalPosition: {x: 0, y: 0, z: -0.00000016084}
   m_LocalScale: {x: 0.59, y: 0.59, z: 0.59}
   m_ConstrainProportionsScale: 1
   m_Children:
@@ -39,8 +39,8 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0, y: 0.5}
   m_AnchorMax: {x: 0, y: 0.5}
-  m_AnchoredPosition: {x: 234.6403, y: 0.41}
-  m_SizeDelta: {x: 724.5563, y: 104.67}
+  m_AnchoredPosition: {x: 272.09, y: 0.41}
+  m_SizeDelta: {x: 851.5, y: 104.67}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!222 &1017368865241099792
 CanvasRenderer:
@@ -837,7 +837,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 1
+  m_IsActive: 0
 --- !u!224 &699398894385555896
 RectTransform:
   m_ObjectHideFlags: 0
@@ -1162,6 +1162,13 @@ MonoBehaviour:
   CurrentSelectionState: 0
   SelectionImage: {fileID: 185450190505666535}
   ActiveSelectionIcon: {fileID: 21300000, guid: b78028fc9a81f3f4c961065aa008560f, type: 3}
+  RequestId: 
+  RobotId: 
+  Status: 
+  Message: 
+  TaskId: 
+  ErrorContextJson: 
+  CreatedAtRaw: 
 --- !u!1 &5337379064935542474
 GameObject:
   m_ObjectHideFlags: 0
@@ -1201,7 +1208,7 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 1, y: 0.5}
   m_AnchorMax: {x: 1, y: 0.5}
-  m_AnchoredPosition: {x: -104, y: 0.40999985}
+  m_AnchoredPosition: {x: -36.700012, y: 0.40999985}
   m_SizeDelta: {x: 64.359985, y: 70.100006}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!222 &8248042865876021107
@@ -1841,6 +1848,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   defaultValue: Unnamed Record
   inputedValue: 
+  isPassword: 0
 --- !u!1 &8644443613692167579
 GameObject:
   m_ObjectHideFlags: 0

@@ -6,4 +6,5 @@ public class DefaultTextValue : MonoBehaviour
 {
     public string defaultValue;
     public string inputedValue;
+    public bool isPassword;
 }
