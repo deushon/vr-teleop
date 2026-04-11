@@ -612,7 +612,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 1
+  m_IsActive: 0
 --- !u!224 &699398894385555896
 RectTransform:
   m_ObjectHideFlags: 0
@@ -1234,6 +1234,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   defaultValue: Unnamed Record
   inputedValue: 
+  isPassword: 0
 --- !u!1 &8644443613692167579
 GameObject:
   m_ObjectHideFlags: 0

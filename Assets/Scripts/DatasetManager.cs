@@ -14,14 +14,14 @@ public class DatasetManager : MonoBehaviour
     [SerializeField] private GameObject recordUI;
     [SerializeField] private NumberInput keyboardManager;
 
-    [SerializeField] private Button sendRecordsButton;
-    [SerializeField] private Button clearAllRecordsButton;
+    //[SerializeField] private Button sendRecordsButton;
+    //[SerializeField] private Button clearAllRecordsButton;
     [SerializeField] private TaskManager taskManager;
 
     [SerializeField] private TMP_Text IpText;
     [SerializeField] private TMP_Text PortText;
 
-    [SerializeField] private AutoDestroyTMPText LogText;
+    public AutoDestroyTMPText LogText;
 
     private List<GameObject> currentRecords = new List<GameObject>();
 
@@ -29,6 +29,8 @@ public class DatasetManager : MonoBehaviour
     private string acceptedAtUtcIso;
     private bool hasAcceptedAt;
     private readonly List<TeleopControlEvent> teleopControlEvents = new();
+
+    private int sendStatus = -1;
 
     public void AddNewRecord()
     {
@@ -85,21 +87,21 @@ public class DatasetManager : MonoBehaviour
         LayoutRebuilder.ForceRebuildLayoutImmediate(parentForLayout);
         currentRecords.Add(record);
 
-        if (!sendRecordsButton.interactable || !clearAllRecordsButton.interactable)
-        {
-            sendRecordsButton.interactable = true;
-            clearAllRecordsButton.interactable = true;
-        }
+        //if (!clearAllRecordsButton.interactable)
+        //{
+        //    //sendRecordsButton.interactable = true;
+        //    clearAllRecordsButton.interactable = true;
+        //}
     }
     public void DeleteRecord(GameObject record)
     {
         currentRecords.Remove(record);
         Destroy(record);
-        if (currentRecords.Count == 0)
-        {
-            sendRecordsButton.interactable = false;
-            clearAllRecordsButton.interactable = false;
-        }
+        //if (currentRecords.Count == 0)
+        //{
+        //    //sendRecordsButton.interactable = false;
+        //    clearAllRecordsButton.interactable = false;
+        //}
     }
 
     public void ClearAllRecords()
@@ -109,8 +111,8 @@ public class DatasetManager : MonoBehaviour
             Destroy(currentRecords[0]);
             currentRecords.RemoveAt(0);
         }
-        sendRecordsButton.interactable = false;
-        clearAllRecordsButton.interactable = false;
+        //sendRecordsButton.interactable = false;
+        //clearAllRecordsButton.interactable = false;
     }
 
     public void SendAllRecords()
@@ -118,29 +120,44 @@ public class DatasetManager : MonoBehaviour
         StartCoroutine(SendAllRecordsCoroutine());
     }
 
-    private IEnumerator SendAllRecordsCoroutine()
+    public int GetRecordSize()
     {
+        return currentRecords.Count;
+    }
+
+    public int GetSendStatus()
+    {
+        return sendStatus;
+    }
+
+    public IEnumerator SendAllRecordsCoroutine()
+    {
+        sendStatus = -1;
         if (IpText == null || string.IsNullOrWhiteSpace(IpText.text))
         {
             Debug.LogError("[Dataset] Robot IP is empty");
+            sendStatus = 1;
             yield break;
         }
 
         if (PortText == null || string.IsNullOrWhiteSpace(PortText.text))
         {
             Debug.LogError("[Dataset] Robot port is empty");
+            sendStatus = 1;
             yield break;
         }
 
         if (taskManager == null || taskManager.GetActiveTaskData() == null)
         {
             Debug.LogError("[Dataset] Active task is missing");
+            sendStatus = 1;
             yield break;
         }
 
         if (!TeleopAuthSession.IsAuthorized || string.IsNullOrWhiteSpace(TeleopAuthSession.AccessToken))
         {
             Debug.LogError("[Dataset] Access token is missing. Login first.");
+            sendStatus = 1;
             yield break;
         }
 
@@ -148,6 +165,7 @@ public class DatasetManager : MonoBehaviour
         if (string.IsNullOrWhiteSpace(robotId))
         {
             Debug.LogError("[Dataset] RobotId is empty");
+            sendStatus = 1;
             yield break;
         }
 
@@ -160,6 +178,7 @@ public class DatasetManager : MonoBehaviour
         {
             source = "unity_quest_dataset",
             generatedUtcIso = System.DateTime.UtcNow.ToString("o"),
+            contractVersion = 2,
             acceptedAtUtcIso = hasAcceptedAt ? acceptedAtUtcIso : null,
             teleopControl = new TeleopControlEventsBlock(),
         };
@@ -211,6 +230,8 @@ public class DatasetManager : MonoBehaviour
             hasAcceptedAt = false;
             acceptedAtUnixTimeNs = 0L;
             acceptedAtUtcIso = null;
+
+            sendStatus = 0;
         }
         else
         {
@@ -218,6 +239,7 @@ public class DatasetManager : MonoBehaviour
             string message = $"[Dataset] Upload failed: {request.result}, {request.error}\nResponse: {responseText}";
             if (LogText != null) LogText.SetText(message);
             Debug.LogError(message);
+            sendStatus = 1;
         }
     }
 
@@ -246,5 +268,5 @@ public class DatasetManager : MonoBehaviour
 
         if (LogText != null)
             LogText.SetText($"[Dataset] Control event: {evt.eventType}");
-    }
+    } 
 }

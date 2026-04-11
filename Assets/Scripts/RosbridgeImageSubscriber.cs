@@ -696,6 +696,8 @@ public class RosbridgeImageSubscriber : MonoBehaviour
                 if (enableRttMonitor)
                     rttMonitorCoroutine = StartCoroutine(RttMonitorLoop());
 
+                publisher?.InitConnection();
+
                 RestartImageWatchdogs();
             });
         }

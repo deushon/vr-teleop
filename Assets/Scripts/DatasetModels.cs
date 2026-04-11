@@ -95,6 +95,7 @@ public class DatasetUploadRequest
 {
     public string source;
     public string generatedUtcIso;
+    public int contractVersion = 2;
     public string acceptedAtUtcIso;
     public List<DatasetUploadRecord> records = new();
 
