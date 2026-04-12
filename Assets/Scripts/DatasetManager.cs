@@ -76,7 +76,7 @@ public class DatasetManager : MonoBehaviour
         if (activeTaskData != null)
         {
             recordData.SetSelectedTask(activeTaskData);
-            keyboardManager.SilentInput(recordData.TextField, activeTaskData.TextField.text);
+            keyboardManager.SilentInput(recordData.TextField, activeTaskData.LabelTextField.text);
         }
 
         recordData.InputTextButton.onClick.AddListener(() =>
@@ -245,8 +245,10 @@ public class DatasetManager : MonoBehaviour
 
     public void MarkAcceptedInWork()
     {
+        acceptedAtUnixTimeNs = GetUnixTimeNs();
         acceptedAtUtcIso = System.DateTime.UtcNow.ToString("o");
         hasAcceptedAt = true;
+        RegisterControlEvent("brief_accepted");
 
         Debug.Log($"[Dataset] Accepted in work at {acceptedAtUtcIso} ({acceptedAtUnixTimeNs})");
 
@@ -254,11 +256,24 @@ public class DatasetManager : MonoBehaviour
             LogText.SetText($"[Dataset] Accepted in work: {acceptedAtUtcIso}");
     }
 
+    public void MarkBriefRejected()
+    {
+        RegisterControlEvent("brief_rejected");
+    }
+
     public void RegisterControlEvent(bool hasControl)
     {
+        RegisterControlEvent(hasControl ? "get_control" : "lost_control");
+    }
+
+    public void RegisterControlEvent(string eventType)
+    {
+        if (string.IsNullOrWhiteSpace(eventType))
+            return;
+
         var evt = new TeleopControlEvent
         {
-            eventType = hasControl ? "get_control" : "lost_control",
+            eventType = eventType,
             timestampUtcIso = System.DateTime.UtcNow.ToString("o")
         };
 
@@ -268,5 +283,28 @@ public class DatasetManager : MonoBehaviour
 
         if (LogText != null)
             LogText.SetText($"[Dataset] Control event: {evt.eventType}");
-    } 
+    }
+
+    public void RegisterLifecycleEvent(string eventName, string reason = null)
+    {
+        if (string.IsNullOrWhiteSpace(eventName))
+            return;
+
+        switch (eventName)
+        {
+            case "pause":
+            case "resume":
+                RegisterControlEvent(eventName);
+                break;
+            case "disconnect":
+                string suffix = string.IsNullOrWhiteSpace(reason) ? "unknown" : reason.Trim();
+                RegisterControlEvent($"disconnect_{suffix}");
+                break;
+        }
+    }
+
+    private static long GetUnixTimeNs()
+    {
+        return (System.DateTime.UtcNow - System.DateTime.UnixEpoch).Ticks * 100L;
+    }
 }

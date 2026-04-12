@@ -74,7 +74,7 @@ public class RosbridgeImageSubscriber : MonoBehaviour
     public bool autoRecoverImageStream = true;
 
     [SerializeField] private GameObject CameraPanelSettings;
-    [SerializeField] private GameObject RecordPanel;
+    //[SerializeField] private GameObject RecordPanel;
     [SerializeField] private GameObject TaskPanel;
     [SerializeField] private SoftHeadFollower DashboardHeadFollower;
     [SerializeField] private GameObject LogoutButton;
@@ -214,6 +214,8 @@ public class RosbridgeImageSubscriber : MonoBehaviour
             string ip = IpText ? IpText.text : "";
             string port = PortText ? PortText.text : "";
             wsUrl = $"ws://{ip}:{port}/ws/teleop/session/{sessionId}?token={TeleopAuthSession.AccessToken}";
+
+            publisher?.ResetRttAbortForNewSession();
 
             if (numberInput) numberInput.Lock = true;
             if (IpText) IpText.color = Color.gray;
@@ -788,6 +790,9 @@ public class RosbridgeImageSubscriber : MonoBehaviour
             Debug.LogWarning($"[ROS] WS Error: {e.Message}");
             SafeLog($"[ROS] WS Error: {e.Message}");
 
+            if (!isStopping)
+                publisher?.RegisterLocalDisconnectForDataset("network");
+
             isConnected = false;
             isConnecting = false;
 
@@ -807,6 +812,9 @@ public class RosbridgeImageSubscriber : MonoBehaviour
         {
             Debug.LogWarning($"[ROS] WS Closed: code={e.Code}, reason={e.Reason}, clean={e.WasClean}");
             SafeLog($"[ROS] WS Closed: code={e.Code}, reason={e.Reason}, clean={e.WasClean}");
+
+            if (!isStopping && wantConnection)
+                publisher?.RegisterLocalDisconnectForDataset("network");
 
             isConnected = false;
             isConnecting = false;
@@ -1080,14 +1088,18 @@ public class RosbridgeImageSubscriber : MonoBehaviour
     {
         try
         {
+            bool wasConnected = currentConnectionState;
             currentConnectionState = state;
 
             if (targetUI) targetUI.enabled = state;
             if (CameraPanelSettings) CameraPanelSettings.SetActive(state);
-            if (RecordPanel) RecordPanel.SetActive(state);
+            //if (RecordPanel) RecordPanel.SetActive(state);
             if (TaskPanel) TaskPanel.SetActive(!state);
             if (DashboardHeadFollower) DashboardHeadFollower.verticalOffset = state ? -0.83f : 0;
             if (LogoutButton) LogoutButton.SetActive(!state);
+
+            if (state && !wasConnected)
+                publisher?.InitConnection();
         }
         catch (Exception ex)
         {

@@ -89,3 +89,36 @@ public class TeleopSessionDto
     [JsonProperty("createdAt")]
     public string createdAt;
 }
+
+[Serializable]
+public class TeleopEndSessionRequest
+{
+    [JsonProperty("reason")]
+    public string reason;
+}
+
+[Serializable]
+public class TeleopEndSessionResponse
+{
+    [JsonProperty("ok")]
+    public bool ok;
+
+    [JsonProperty("idempotent")]
+    public bool idempotent;
+
+    [JsonProperty("reason")]
+    public string reason;
+
+    [JsonProperty("helpRequestId")]
+    public string helpRequestId;
+}
+
+[Serializable]
+public class TeleopDeclineBeforeConnectResponse
+{
+    [JsonProperty("ok")]
+    public bool ok;
+
+    [JsonProperty("helpRequest")]
+    public TeleopAcceptedHelpRequestDto helpRequest;
+}

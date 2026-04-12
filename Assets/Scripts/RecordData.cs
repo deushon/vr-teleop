@@ -32,10 +32,10 @@ public class RecordData : MonoBehaviour
 
     public string GetSelectedTaskName()
     {
-        if (selectedTask == null || selectedTask.TextField == null)
+        if (selectedTask == null || selectedTask.LabelTextField == null)
             return string.Empty;
 
-        return selectedTask.TextField.text;
+        return selectedTask.LabelTextField.text;
     }
 
     public string GetLabel()

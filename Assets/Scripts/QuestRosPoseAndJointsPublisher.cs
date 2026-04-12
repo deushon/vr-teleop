@@ -64,6 +64,9 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
     [Tooltip("How many consecutive bad RTT checks are required to stop control.")]
     [Range(1, 10)] public int rttBadSamplesToStop = 2;
 
+    [Tooltip("How long to ignore startup RTT spikes after rosbridge connection/control start.")]
+    public float rttStartupGraceSec = 3.0f;
+
     [Header("RTT Debug / Test")]
     [Tooltip("Artificial RTT added on top of measured ping, for testing.")]
     public int debugArtificialRttOffsetMs = 0;
@@ -178,15 +181,20 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
     private Coroutine ntpSyncCoroutine;
 
     private Coroutine rttMonitorCoroutine;
+    private Coroutine startControlCoroutine;
     private volatile bool controlSessionActive;
     private volatile bool rttGatePassed;
     private volatile int lastMeasuredRttMs = -1;
     private volatile int consecutiveBadRttSamples;
     private volatile bool disconnectRequestedByRttGate;
+    private volatile bool rttAbortHandled;
+    private volatile float rttGateReadyAtRealtime;
     private volatile bool isConnectingTx;
     private volatile bool lifecyclePauseSent;
     private volatile bool lifecycleDisconnectSent;
     private volatile bool lifecycleSessionActiveSent;
+    private bool preControlXWasPressed;
+    private int preControlAutoButtonPhase;
 
     private volatile bool isRobotControlled;
     public bool IsRobotControlled => isRobotControlled;
@@ -196,9 +204,10 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
 
     [SerializeField] private GameObject PingErrorScreen;
     [SerializeField] private GameObject PressXScreen;
-    [SerializeField] private Button SplitRecordingButton;
-    [SerializeField] private Button EnableControlButton;
-    [SerializeField] private Button DisableControlButton;
+    //[SerializeField] private Button SplitRecordingButton;
+    //[SerializeField] private Button EnableControlButton;
+    //[SerializeField] private Button DisableControlButton;
+    [SerializeField] private Button EndSessionButton;
     [SerializeField] private GameObject LogoutButton;
 
     [SerializeField] private TaskManager taskManager;
@@ -214,8 +223,18 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
             ntpSyncCoroutine = StartCoroutine(InitializeNtpTime());
     }
 
+    public void ResetRttAbortForNewSession()
+    {
+        rttAbortHandled = false;
+    }
+
     public void InitConnection()
     {
+        if (rttAbortHandled || startControlCoroutine != null || isConnectingTx || controlSessionActive)
+            return;
+
+        rttAbortHandled = false;
+        rttGateReadyAtRealtime = Time.realtimeSinceStartup + Mathf.Max(0f, rttStartupGraceSec);
         Disconnect(null);
 
         if (!gameObject.activeInHierarchy)
@@ -224,9 +243,10 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
             return;
         }
 
-        if (rosbridgeSubscriber != null && rosbridgeSubscriber.IsRosbridgeConnected && !rosbridgeSubscriber.HasValidRttSample)
+        if (rosbridgeSubscriber != null && rosbridgeSubscriber.IsRosbridgeConnected &&
+            (!rosbridgeSubscriber.HasValidRttSample || GetRemainingRttStartupGraceSec() > 0f))
         {
-            StartCoroutine(StartControlSessionWhenRttReady());
+            StartControlStartup(StartControlSessionWhenRttReady());
             return;
         }
 
@@ -235,14 +255,11 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
             if (reason != null && reason.Contains("RTT"))
                 PublishTeleopLifecycleEvent("disconnect", "ping_exceeded");
 
-            PingErrorScreen.SetActive(true);
-            DisableControlButton.gameObject.SetActive(false);
-            EnableControlButton.gameObject.SetActive(true);
-            Debug.LogWarning("[ROS TX] Control start blocked before TX connect: " + reason);
+            ShowPingErrorAndDisconnectOnce("[ROS TX] Control start blocked before TX connect: " + reason);
             return;
         }
 
-        StartCoroutine(StartControlSessionRoutine());
+        StartControlStartup(StartControlSessionRoutine());
     }
 
     public void Disconnect()
@@ -250,12 +267,31 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
         Disconnect("user_exit");
     }
 
+    public void PauseControlForFinishConfirmation()
+    {
+        if (isRecording)
+            StopRecordingAndSave();
+
+        RegisterLostControlIfNeeded();
+        PressXScreen.SetActive(false);
+    }
+
+    public void ResumeControlAfterFinishCancelled()
+    {
+        rttAbortHandled = false;
+        Disconnect(null);
+        InitConnection();
+    }
+
     private void Disconnect(string lifecycleReason)
     {
         bool wasSessionActive = controlSessionActive || isConnectingTx || isRecording;
 
         if (wasSessionActive && !string.IsNullOrWhiteSpace(lifecycleReason))
+        {
+            RegisterLostControlIfNeeded();
             PublishTeleopLifecycleEvent("disconnect", lifecycleReason);
+        }
 
         if (sendLoopCoroutine != null)
         {
@@ -273,6 +309,12 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
         {
             StopCoroutine(rttMonitorCoroutine);
             rttMonitorCoroutine = null;
+        }
+
+        if (startControlCoroutine != null)
+        {
+            StopCoroutine(startControlCoroutine);
+            startControlCoroutine = null;
         }
 
         UnregisterSharedSocketTopics();
@@ -294,14 +336,14 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
         isRobotControlled = false;
 
         PressXScreen.SetActive(false);
-        SplitRecordingButton.gameObject.SetActive(false);
-        DisableControlButton.gameObject.SetActive(false);
-        EnableControlButton.gameObject.SetActive(true);
+        //SplitRecordingButton.gameObject.SetActive(false);
+        //DisableControlButton.gameObject.SetActive(false);
+        //EnableControlButton.gameObject.SetActive(true);
     }
 
     void OnDisable()
     {
-        Disconnect("app_background");
+        Disconnect(GetAppExitReason());
     }
 
     void OnApplicationPause(bool pauseStatus)
@@ -428,7 +470,7 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
             names.Add($"{side}_stick_x"); vals.Add(axis.x);
             names.Add($"{side}_stick_y"); vals.Add(axis.y);
 
-            // click/touch ùùùù ùùùùùùùù
+            // click/touch ÔøΩÔøΩÔøΩÔøΩ ÔøΩÔøΩÔøΩÔøΩÔøΩÔøΩÔøΩÔøΩ
             names.Add($"{side}_stick_click"); vals.Add(ReadBoolAsFloat(dev, CommonUsages.primary2DAxisClick));
             names.Add($"{side}_stick_touch"); vals.Add(ReadBoolAsFloat(dev, CommonUsages.primary2DAxisTouch));
         };
@@ -494,6 +536,8 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
             AddHand("L", leftHandDev);
             AddHand("R", rightHandDev);
         }
+
+        ApplyPreControlCalibrationSequence(names, vals);
 
         var jointHeader = RosHeader(headFrameId);
         var jointMsg = new JObject
@@ -737,6 +781,8 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
 
         if (debugPrint)
             Debug.Log($"[ROS TX] Teleop lifecycle: {payload.ToString(Formatting.None)}");
+
+        datasetManager?.RegisterLifecycleEvent(eventName, reason);
     }
 
     void PublishPauseIfActive(string reason)
@@ -755,6 +801,43 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
 
         PublishTeleopLifecycleEvent("resume");
         lifecyclePauseSent = false;
+    }
+
+    public void PrepareForDatasetUploadEnd()
+    {
+        RegisterLostControlIfNeeded();
+
+        if (isRecording)
+            StopRecordingAndSave();
+    }
+
+    public void RegisterLocalDisconnectForDataset(string reason)
+    {
+        if (!controlSessionActive && !isRecording && !isRobotControlled)
+            return;
+
+        RegisterLostControlIfNeeded();
+        datasetManager?.RegisterLifecycleEvent("disconnect", string.IsNullOrWhiteSpace(reason) ? "unknown" : reason);
+
+        if (isRecording)
+            StopRecordingAndSave();
+
+        controlSessionActive = false;
+        lifecycleDisconnectSent = true;
+    }
+
+    string GetAppExitReason()
+    {
+        return "app_background";
+    }
+
+    void RegisterLostControlIfNeeded()
+    {
+        if (!isRobotControlled)
+            return;
+
+        datasetManager?.RegisterControlEvent(false);
+        isRobotControlled = false;
     }
 
     static long GetUnixTimeNs()
@@ -948,6 +1031,65 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
                 w = poseToken["orientation"]?["w"]?.Value<float>() ?? 1f
             }
         };
+    }
+
+    void ApplyPreControlCalibrationSequence(List<string> names, List<float> vals)
+    {
+        bool waitingForX = PressXScreen != null && PressXScreen.activeInHierarchy && !isRobotControlled;
+
+        if (!waitingForX)
+        {
+            preControlXWasPressed = false;
+            preControlAutoButtonPhase = 0;
+            return;
+        }
+
+        bool xPressed = GetJointValue(names, vals, "L_X") >= 0.5f;
+        if (xPressed && !preControlXWasPressed && preControlAutoButtonPhase == 0)
+            preControlAutoButtonPhase = 1;
+
+        preControlXWasPressed = xPressed;
+
+        if (preControlAutoButtonPhase == 1)
+        {
+            SetOrAddJointValue(names, vals, "R_A", 1f);
+            SetOrAddJointValue(names, vals, "L_X", 0f);
+            preControlAutoButtonPhase = 2;
+        }
+        else if (preControlAutoButtonPhase == 2)
+        {
+            SetOrAddJointValue(names, vals, "R_A", 0f);
+            SetOrAddJointValue(names, vals, "L_X", 1f);
+            preControlAutoButtonPhase = 0;
+        }
+    }
+
+    static float GetJointValue(List<string> names, List<float> vals, string jointName)
+    {
+        int count = Mathf.Min(names.Count, vals.Count);
+        for (int i = 0; i < count; i++)
+        {
+            if (names[i] == jointName)
+                return vals[i];
+        }
+
+        return 0f;
+    }
+
+    static void SetOrAddJointValue(List<string> names, List<float> vals, string jointName, float value)
+    {
+        int count = Mathf.Min(names.Count, vals.Count);
+        for (int i = 0; i < count; i++)
+        {
+            if (names[i] == jointName)
+            {
+                vals[i] = value;
+                return;
+            }
+        }
+
+        names.Add(jointName);
+        vals.Add(value);
     }
 
     List<RecordedJointValue> BuildJointValues(List<string> names, List<float> vals)
@@ -1148,8 +1290,24 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
         Publish(recordSessionTopic, "std_msgs/String", wrapper);
     }
 
+    private void StartControlStartup(IEnumerator routine)
+    {
+        if (startControlCoroutine != null)
+            StopCoroutine(startControlCoroutine);
+
+        startControlCoroutine = StartCoroutine(StartControlStartupRoutine(routine));
+    }
+
+    private IEnumerator StartControlStartupRoutine(IEnumerator routine)
+    {
+        yield return StartCoroutine(routine);
+        startControlCoroutine = null;
+    }
+
     private IEnumerator StartControlSessionWhenRttReady()
     {
+        yield return WaitForRttStartupGrace();
+
         const float timeoutSec = 3f;
         float startTime = Time.realtimeSinceStartup;
 
@@ -1166,10 +1324,7 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
             if (reason != null && reason.Contains("RTT"))
                 PublishTeleopLifecycleEvent("disconnect", "ping_exceeded");
 
-            PingErrorScreen.SetActive(true);
-            DisableControlButton.gameObject.SetActive(false);
-            EnableControlButton.gameObject.SetActive(true);
-            Debug.LogWarning("[ROS TX] Control start blocked after waiting for RTT: " + reason);
+            ShowPingErrorAndDisconnectOnce("[ROS TX] Control start blocked after waiting for RTT: " + reason);
             yield break;
         }
 
@@ -1192,7 +1347,8 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
         {
             isConnectingTx = false;
             Debug.LogWarning("[ROS TX] Cannot start control: shared ROS socket is not open.");
-            DisableControlButton.onClick.Invoke();
+            Disconnect("ping_exceeded");
+            //DisableControlButton.onClick.Invoke();
             yield break;
         }
 
@@ -1200,15 +1356,13 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
 
         if (enableRttGate)
         {
+            yield return WaitForRttStartupGrace();
             yield return StartCoroutine(RunRttPreflightGateSharedSocket());
 
             if (!rttGatePassed)
             {
-                PublishTeleopLifecycleEvent("disconnect", "ping_exceeded");
                 isConnectingTx = false;
-                Debug.LogWarning("[ROS TX] Control blocked by RTT gate.");
-                PingErrorScreen.SetActive(true);
-                DisableControlButton.onClick.Invoke();
+                ShowPingErrorAndDisconnectOnce("[ROS TX] Control blocked by RTT gate.");
                 yield break;
             }
         }
@@ -1242,6 +1396,8 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
 
     private IEnumerator RunRttPreflightGateSharedSocket()
     {
+        yield return WaitForRttStartupGrace();
+
         if (rosbridgeSubscriber == null || !rosbridgeSubscriber.IsSocketOpen)
         {
             rttGatePassed = false;
@@ -1318,21 +1474,59 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
         return true;
     }
 
-    private void StopControlSessionByRttGate()
+    private void ShowPingErrorAndDisconnectOnce(string logMessage)
     {
-        Debug.LogWarning("[ROS TX] Stopping control session due to RTT gate.");
+        if (rttAbortHandled)
+            return;
 
+        rttAbortHandled = true;
+        Debug.LogWarning(logMessage);
         PublishTeleopLifecycleEvent("disconnect", "ping_exceeded");
 
-        PingErrorScreen.SetActive(true);
+        if (PingErrorScreen != null && !PingErrorScreen.activeSelf)
+            PingErrorScreen.SetActive(true);
+
+        print("Disconnected there");
+
+        if (EndSessionButton != null)
+        {
+            EndSessionButton.interactable = true;
+            EndSessionButton.gameObject.SetActive(false);
+        }
+
+        Disconnect("ping_exceeded");
+    }
+
+    private void StopControlSessionByRttGate()
+    {
+        if (rttAbortHandled)
+            return;
+
+        rttAbortHandled = true;
+        Debug.LogWarning("[ROS TX] Stopping control session due to RTT gate.");
+
+        RegisterLostControlIfNeeded();
+        PublishTeleopLifecycleEvent("disconnect", "ping_exceeded");
+
+        if (PingErrorScreen != null && !PingErrorScreen.activeSelf)
+            PingErrorScreen.SetActive(true);
+
+        print("Disconnected there");
+
+        if (EndSessionButton != null)
+        {
+            EndSessionButton.interactable = true;
+            EndSessionButton.gameObject.SetActive(false);
+        }
         if (isRecording)
         {
             StopRecordingAndSave();
         }
         PressXScreen.SetActive(false);
-        SplitRecordingButton.gameObject.SetActive(false);
-        DisableControlButton.gameObject.SetActive(true);
-        DisableControlButton.onClick.Invoke();
+        //SplitRecordingButton.gameObject.SetActive(false);
+        //DisableControlButton.gameObject.SetActive(true);
+        Disconnect("ping_exceeded");
+        //DisableControlButton.onClick.Invoke();
     }
 
     private bool CanStartControlFromSubscriberRtt(out string reason)
@@ -1456,7 +1650,7 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
 
     private IEnumerator RttMonitorLoopSharedSocket()
     {
-        yield return new WaitForSecondsRealtime(Mathf.Max(0.1f, rttMonitorIntervalSec));
+        yield return new WaitForSecondsRealtime(Mathf.Max(0.1f, rttMonitorIntervalSec, GetRemainingRttStartupGraceSec()));
 
         while (rosbridgeSubscriber != null && rosbridgeSubscriber.IsSocketOpen)
         {
@@ -1511,5 +1705,17 @@ public class QuestRosPoseAndJointsPublisher : MonoBehaviour
 
             yield return new WaitForSecondsRealtime(Mathf.Max(0.1f, rttMonitorIntervalSec));
         }
+    }
+
+    private IEnumerator WaitForRttStartupGrace()
+    {
+        float remaining = GetRemainingRttStartupGraceSec();
+        if (remaining > 0f)
+            yield return new WaitForSecondsRealtime(remaining);
+    }
+
+    private float GetRemainingRttStartupGraceSec()
+    {
+        return Mathf.Max(0f, rttGateReadyAtRealtime - Time.realtimeSinceStartup);
     }
 }

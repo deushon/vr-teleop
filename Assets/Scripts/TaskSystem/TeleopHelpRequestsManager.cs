@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Text;
 using Newtonsoft.Json;
 using TMPro;
 using UnityEngine;
@@ -27,10 +28,18 @@ public class TeleopHelpRequestsManager : MonoBehaviour
 
     private string BaseUrl => $"http://{ip?.Trim()}:{port?.Trim()}";
 
+    private void RefreshConnectionFromFields()
+    {
+        if (ipText != null)
+            ip = ipText.inputedValue;
+
+        if (portText != null)
+            port = portText.inputedValue;
+    }
+
     public void LoadHelpRequests()
     {
-        ip = ipText.inputedValue;
-        port = portText.inputedValue;
+        RefreshConnectionFromFields();
         if (IsBusy)
         {
             Debug.LogWarning("[HELP] Request already in progress.");
@@ -213,6 +222,105 @@ public class TeleopHelpRequestsManager : MonoBehaviour
         SetStatus($"[HELP] Accepted. Session ID = {sessionId}");
 
         onDone?.Invoke(sessionId);
+    }
+
+    public IEnumerator EndSessionCoroutine(string sessionId, string reason, Action<bool, string> onDone)
+    {
+        RefreshConnectionFromFields();
+
+        if (!ValidateSessionRequest(sessionId, out string validationError))
+        {
+            onDone?.Invoke(false, validationError);
+            yield break;
+        }
+
+        if (string.IsNullOrWhiteSpace(reason))
+        {
+            onDone?.Invoke(false, "Session end reason is empty.");
+            yield break;
+        }
+
+        string url = $"{BaseUrl}/api/teleoperator/sessions/{sessionId}/end";
+        var bodyObj = new TeleopEndSessionRequest { reason = reason };
+        byte[] body = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(bodyObj));
+
+        using var request = new UnityWebRequest(url, UnityWebRequest.kHttpVerbPOST);
+        request.uploadHandler = new UploadHandlerRaw(body);
+        request.downloadHandler = new DownloadHandlerBuffer();
+        request.SetRequestHeader("accept", "application/json");
+        request.SetRequestHeader("Authorization", $"Bearer {TeleopAuthSession.AccessToken}");
+        request.SetRequestHeader("Content-Type", "application/json");
+
+        yield return request.SendWebRequest();
+
+        if (request.result != UnityWebRequest.Result.Success)
+        {
+            string responseText = request.downloadHandler != null ? request.downloadHandler.text : "";
+            string message = $"[HELP] Session end failed: {request.responseCode}, {request.error}. {responseText}";
+            Debug.LogWarning(message);
+            SetStatus(message);
+            onDone?.Invoke(false, message);
+            yield break;
+        }
+
+        SetStatus($"[HELP] Session ended: {reason}");
+        onDone?.Invoke(true, request.downloadHandler != null ? request.downloadHandler.text : "");
+    }
+
+    public IEnumerator DeclineBeforeConnectCoroutine(string sessionId, Action<bool, string> onDone)
+    {
+        RefreshConnectionFromFields();
+
+        if (!ValidateSessionRequest(sessionId, out string validationError))
+        {
+            onDone?.Invoke(false, validationError);
+            yield break;
+        }
+
+        string url = $"{BaseUrl}/api/teleoperator/sessions/{sessionId}/decline-before-connect";
+
+        using var request = new UnityWebRequest(url, UnityWebRequest.kHttpVerbPOST);
+        request.uploadHandler = new UploadHandlerRaw(Array.Empty<byte>());
+        request.downloadHandler = new DownloadHandlerBuffer();
+        request.SetRequestHeader("accept", "application/json");
+        request.SetRequestHeader("Authorization", $"Bearer {TeleopAuthSession.AccessToken}");
+
+        yield return request.SendWebRequest();
+
+        if (request.result != UnityWebRequest.Result.Success)
+        {
+            string responseText = request.downloadHandler != null ? request.downloadHandler.text : "";
+            string message = $"[HELP] Decline before connect failed: {request.responseCode}, {request.error}. {responseText}";
+            Debug.LogWarning(message);
+            SetStatus(message);
+            onDone?.Invoke(false, message);
+            yield break;
+        }
+
+        SetStatus("[HELP] Session declined before robot connection.");
+        onDone?.Invoke(true, request.downloadHandler != null ? request.downloadHandler.text : "");
+    }
+
+    private bool ValidateSessionRequest(string sessionId, out string error)
+    {
+        if (!TeleopAuthSession.IsAuthorized || string.IsNullOrWhiteSpace(TeleopAuthSession.AccessToken))
+        {
+            error = "[HELP] No auth token. Login first.";
+            Debug.LogError(error);
+            SetStatus(error);
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            error = "[HELP] Session id is empty.";
+            Debug.LogWarning(error);
+            SetStatus(error);
+            return false;
+        }
+
+        error = null;
+        return true;
     }
 
 

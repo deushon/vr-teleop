@@ -6,11 +6,13 @@ using UnityEngine.UI;
 public class TaskData : MonoBehaviour
 {
     [Header("UI")]
-    public TMP_Text TextField;
+    public TMP_Text LabelTextField;
+    public TMP_Text BodyTextField;
+    public GameObject DropdownBody;
     public bool CurrentSelectionState = false;
-    public Image SelectionImage;
-    public Sprite ActiveSelectionIcon;
-    private Sprite disabledSelectionIcon;
+    public Image DropdownImage;
+    public Sprite openedDropdownIcon;
+    private Sprite closedDropdownIcon;
 
     [Header("Help Request Data")]
     public string RequestId;
@@ -24,6 +26,8 @@ public class TaskData : MonoBehaviour
     public string SessionId;
 
     private TaskManager taskManager;
+
+    private bool isDropdownOpened = false;
 
     public DateTime? CreatedAtUtc
     {
@@ -50,8 +54,8 @@ public class TaskData : MonoBehaviour
     {
         taskManager = FindFirstObjectByType<TaskManager>();
 
-        if (SelectionImage != null)
-            disabledSelectionIcon = SelectionImage.sprite;
+        if (DropdownImage != null)
+            closedDropdownIcon = DropdownImage.sprite;
     }
 
     public void SetupFromHelpRequest(TeleopHelpRequestDto dto)
@@ -74,15 +78,16 @@ public class TaskData : MonoBehaviour
 
     public void UpdateUiText()
     {
-        if (TextField == null)
+        if (LabelTextField == null)
             return;
 
         string createdText = CreatedAtUtc.HasValue
             ? CreatedAtUtc.Value.ToString("u")
             : CreatedAtRaw;
 
-        TextField.text =
-            $"[{Status}] {Message}\n" +
+        LabelTextField.text =
+            $"[{Status}] {Message}\n";
+        BodyTextField.text =
             $"Task ID: {TaskId}\n" +
             $"Robot ID: {RobotId}\n" +
             $"Created: {createdText}";
@@ -92,7 +97,7 @@ public class TaskData : MonoBehaviour
     {
         if (CurrentSelectionState)
         {
-            ChangeSelection();
+            ClearSelection();
         }
 
         if (taskManager == null)
@@ -101,19 +106,40 @@ public class TaskData : MonoBehaviour
         taskManager.DeleteTask(gameObject);
     }
 
-    public void ChangeSelection()
+    public void ChangeDropdownCard()
+    {
+        isDropdownOpened = !isDropdownOpened;
+        DropdownBody.SetActive(isDropdownOpened);
+
+        if (DropdownImage != null)
+            DropdownImage.sprite = isDropdownOpened ? openedDropdownIcon : closedDropdownIcon;
+
+        LayoutRebuilder.ForceRebuildLayoutImmediate(GetComponent<RectTransform>());
+        var parentTransform = transform.parent.GetComponent<RectTransform>();
+        if (parentTransform)
+        {
+            LayoutRebuilder.ForceRebuildLayoutImmediate(parentTransform);
+        }
+    }
+
+    public void TakeTask()
     {
         if (taskManager == null)
             taskManager = FindFirstObjectByType<TaskManager>();
 
-        taskManager.ChangeSelection(this);
+        taskManager.SetActiveTask(this);
+    }
+
+    public void ClearSelection()
+    {
+        if (taskManager == null)
+            taskManager = FindFirstObjectByType<TaskManager>();
+
+        taskManager.ClearSelection();
     }
 
     public void SetSelectionState(bool state)
     {
         CurrentSelectionState = state;
-
-        if (SelectionImage != null)
-            SelectionImage.sprite = state ? ActiveSelectionIcon : disabledSelectionIcon;
     }
 }

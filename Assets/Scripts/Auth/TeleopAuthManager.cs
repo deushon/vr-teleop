@@ -30,6 +30,8 @@ public class TeleopAuthManager : MonoBehaviour
     [Header("Optional UI")]
     [SerializeField] private AutoDestroyTMPText logs;
 
+    [SerializeField] private TeleopHelpRequestsManager helpRequestsManager;
+
     public bool IsBusy { get; private set; }
 
     public string BaseUrl
@@ -144,6 +146,7 @@ public class TeleopAuthManager : MonoBehaviour
         LogoutButton.SetActive(true);
         LoginButton.SetActive(false);
         AuthCanvas.SetActive(false);
+        helpRequestsManager.LoadHelpRequests();
 
         Debug.Log($"[AUTH] Login OK. User={TeleopAuthSession.UserLogin}, id={TeleopAuthSession.UserId}");
         SetStatus($"[AUTH] Logged in as {TeleopAuthSession.UserLogin}");

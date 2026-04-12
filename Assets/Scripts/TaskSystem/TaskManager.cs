@@ -17,6 +17,11 @@ public class TaskManager : MonoBehaviour
     [SerializeField] private TMP_Text ErrorContextText;
     [SerializeField] private TMP_Text SituationReportText;
 
+    [SerializeField] private GameObject LoadingScreen;
+    [SerializeField] private GameObject ErrorWhileLoadingScreen;
+    [SerializeField] private GameObject DatasetRecordingsControlScreen;
+    [SerializeField] private GameObject MetaDataScreen;
+
     private List<GameObject> currentTasks = new List<GameObject>();
 
     private TaskData activeSelection = null;
@@ -55,7 +60,7 @@ public class TaskManager : MonoBehaviour
         }
 
         taskData.SetupFromHelpRequest(data);
-        taskData.TextField.text = data.payload.message;
+        taskData.LabelTextField.text = data.payload.message;
 
         LayoutRebuilder.ForceRebuildLayoutImmediate(parentForLayout);
         currentTasks.Add(task);
@@ -86,28 +91,22 @@ public class TaskManager : MonoBehaviour
         clearAllTasksButton.interactable = false;
     }
 
-    public void ChangeSelection(TaskData data)
+    public void SetActiveTask(TaskData data)
     {
-        if (activeSelection != null) 
+        if (activeSelection != null)
         {
-            if (activeSelection == data)
-            {
-                data.SetSelectionState(!data.CurrentSelectionState);
-                activeSelection = null;
-                return;
-            }
-            else
-            {
-                activeSelection.SetSelectionState(false);
-            }
+            activeSelection.SetSelectionState(false);
         }
         data.SetSelectionState(true);
         activeSelection = data;
         TaskPanel.SetActive(false);
+        LoadingScreen.SetActive(true);
         helpRequestsManager.AcceptHelpRequest(data.RequestId, sessionId =>
         {
             if (string.IsNullOrWhiteSpace(sessionId))
             {
+                LoadingScreen.SetActive(false);
+                ErrorWhileLoadingScreen.SetActive(true);
                 Debug.LogWarning("Unable to get session id");
                 return;
             }
@@ -119,9 +118,23 @@ public class TaskManager : MonoBehaviour
             SituationReportText.text = activeSelection.SituationReport;
 
             activeSelection.SessionId = sessionId;
-            imageSubscriber.InitConnection(sessionId);
+
+            LoadingScreen.SetActive(false);
+            DatasetRecordingsControlScreen.SetActive(true);
+            MetaDataScreen.SetActive(true);
         });
-        
+
+    }
+
+    public void ClearSelection()
+    {
+        activeSelection.SetSelectionState(false);
+        activeSelection = null;
+    }
+
+    public void InitConnection()
+    {
+        imageSubscriber.InitConnection(activeSelection.SessionId);
     }
 
     public TaskData GetActiveTaskData()
